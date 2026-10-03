@@ -1,0 +1,11 @@
+# Full fine-tuning, no DP (epsilon = infinity). Hyperparameters are shared by all configs (ARCHITECTURE I-R6).
+exp_name: baseline_full_clean
+model_name: roberta-base
+train_layers: "all"
+use_dp: false
+epochs: 5
+batch_size: 32
+lr: 5.0e-5
+max_train_samples: 1024
+audit_size: 500
+seed: 42

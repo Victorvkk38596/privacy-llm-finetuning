@@ -1,152 +1,305 @@
+"""Train ONE model (role A or B of a swap pair), then cache its logits on every split.
+
+All attacks run later, in post-processing, on the cached logits (see run_pair.py / src/audit.py).
+No weights are ever written to disk. Run each role in its own process (run_pair.py does this).
+"""
 import argparse
+import collections
+import json
 import os
+import random
+
+import numpy as np
 import torch
-import pandas as pd
+import yaml
 from datasets import load_dataset
-from transformers import AutoTokenizer, DataCollatorWithPadding
-from torch.utils.data import DataLoader
 from opacus import PrivacyEngine
+from opacus.accountants.utils import get_noise_multiplier
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 from opacus.validators import ModuleValidator
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer, DataCollatorWithPadding
 
-from src.models import get_model
-from src.audit import run_mia_audit
+from src import data as D
+from src.audit import compute_logits
+from src.models import get_model, param_groups
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="roberta-base")
-    parser.add_argument("--train_layers", type=str, default="all", help="'all', 'head', or '9,10,11'")
-    parser.add_argument("--use_dp", action="store_true", help="Enable DP-SGD")
-    parser.add_argument("--target_epsilon", type=float, default=5.0)
-    parser.add_argument("--target_delta", type=float, default=1e-5)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=2e-5)
-    parser.add_argument("--max_train_samples", type=int, default=1024, help="Subsample as in DP-SelFT")
-    parser.add_argument("--exp_name", type=str, default="test_run")
-    args = parser.parse_args()
+C_BIG = 1e4  # "clipping off" threshold for the noise-only diagnostic arm
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Active Device: {device}")
 
-    # 1. Dataset & Tokenization (SST-2)
-    print("\n[1/5] Loading and tokenizing SST-2...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    raw_dataset = load_dataset("nyu-mll/glue", "sst2")
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    def tokenize_fn(examples):
+
+def build_parser():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", type=str, default=None, help="YAML hyperparameters; CLI flags override.")
+    p.add_argument("--model_name", type=str, default="roberta-base")
+    p.add_argument("--train_layers", type=str, default="all", help="'all', 'head', or '9,10,11'")
+    p.add_argument("--freeze_embeddings", type=lambda s: s.lower() != "false", default=True)
+    p.add_argument("--use_dp", action="store_true")
+    p.add_argument("--diag_arm", type=str, default="none", choices=["none", "clip_only", "noise_only"],
+                   help="Non-DP diagnostic arms of the 2x2 clipping/noise factorial (needs --use_dp).")
+    p.add_argument("--target_epsilon", type=float, default=5.0)
+    p.add_argument("--target_delta", type=float, default=1e-5)
+    p.add_argument("--max_grad_norm", type=float, default=1.0)
+    p.add_argument("--max_steps", type=int, default=1000)
+    p.add_argument("--batch_size", type=int, default=64, help="Logical batch size")
+    p.add_argument("--physical_batch", type=int, default=16, help="Max physical batch under DP (BatchMemoryManager)")
+    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--warmup_frac", type=float, default=0.05)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--role", type=str, default="A", choices=["A", "B"])
+    p.add_argument("--exp_name", type=str, default="test_run")
+    p.add_argument("--cache_dir", type=str, default="results/cache")
+    p.add_argument("--pilot", action="store_true",
+                   help="LR pilot: train on D_A, report accuracy on D_tune, write results/pilot.csv only.")
+    p.add_argument("--debug_small", action="store_true", help="Tiny splits for pipeline smoke tests.")
+    return p
+
+
+def parse_args(argv=None):
+    parser = build_parser()
+    pre, _ = parser.parse_known_args(argv)
+    if pre.config:
+        with open(pre.config) as f:
+            cfg = yaml.safe_load(f) or {}
+        valid = {a.dest for a in parser._actions} - {"help", "config"}
+        unknown = set(cfg) - valid
+        if unknown:
+            raise ValueError(f"Unknown keys in {pre.config}: {sorted(unknown)}")
+        if "train_layers" in cfg:
+            cfg["train_layers"] = str(cfg["train_layers"])
+        parser.set_defaults(**cfg)
+    args = parser.parse_args(argv)
+    if args.diag_arm != "none" and not args.use_dp:
+        raise ValueError("--diag_arm requires --use_dp")
+    return args
+
+
+# --------------------------------------------------------------------------- telemetry
+def attach_telemetry(optimizer, gmap, clip_c):
+    """Wraps DPOptimizer to record per-sample grad norms, clip fraction, group energy shares, noise/signal."""
+    st = {"n": 0, "clipped": 0, "norms": [], "share": collections.defaultdict(float), "ns": []}
+    orig_clip, orig_noise = optimizer.clip_and_accumulate, optimizer.add_noise
+
+    def clip_and_accumulate():
+        ps = [p for p in optimizer.params if getattr(p, "grad_sample", None) is not None]
+        sq = collections.defaultdict(lambda: 0.0)
+        for p in ps:
+            g = p.grad_sample.reshape(p.grad_sample.shape[0], -1)
+            sq[gmap[id(p)]] = sq[gmap[id(p)]] + g.float().pow(2).sum(dim=1)
+        total = sum(sq.values())
+        norms = total.sqrt()
+        n = norms.numel()
+        st["n"] += n
+        st["clipped"] += int((norms > clip_c).sum())
+        if len(st["norms"]) < 20000:
+            st["norms"].extend(norms.detach().cpu().tolist())
+        for name, v in sq.items():
+            st["share"][name] += float((v / total.clamp_min(1e-30)).sum())
+        return orig_clip()
+
+    def add_noise():
+        signal = torch.sqrt(sum(p.summed_grad.float().pow(2).sum() for p in optimizer.params))
+        orig_noise()
+        noise = torch.sqrt(sum((p.grad.float() - p.summed_grad.float()).pow(2).sum() for p in optimizer.params))
+        st["ns"].append(float(noise / signal.clamp_min(1e-30)))
+
+    optimizer.clip_and_accumulate, optimizer.add_noise = clip_and_accumulate, add_noise
+    return st
+
+
+def summarize_telemetry(st):
+    if not st or st["n"] == 0:
+        return {}
+    norms = np.array(st["norms"])
+    share = {k: v / st["n"] for k, v in st["share"].items()}
+    return {
+        "clip_fraction": st["clipped"] / st["n"],
+        "median_grad_norm": float(np.median(norms)),
+        "p10_grad_norm": float(np.percentile(norms, 10)),
+        "p90_grad_norm": float(np.percentile(norms, 90)),
+        "head_energy_share": share.get("head", 0.0),
+        "group_energy_share": share,
+        "noise_signal_ratio": float(np.mean(st["ns"])) if st["ns"] else None,
+    }
+
+
+# --------------------------------------------------------------------------- data
+def load_splits(args, tokenizer):
+    raw = load_dataset("nyu-mll/glue", "sst2")
+    sizes = ({"A": 32, "B": 32, "out": 32, "pop": 32, "tune": 64} if args.debug_small else D.SPLIT_SIZES)
+    items = D.assign_families(D.build_pool(raw["train"]["sentence"], raw["train"]["label"]))
+    part = D.make_partition(items, args.seed, sizes)
+    idx = D.partition_indices(part)
+
+    def tok(examples):
         return tokenizer(examples["sentence"], truncation=True, max_length=128)
 
-    tokenized_dataset = raw_dataset.map(tokenize_fn, batched=True)
-    tokenized_dataset = tokenized_dataset.remove_columns(["sentence", "idx"])
-    tokenized_dataset.set_format("torch")
+    def make(ds):
+        ds = ds.map(tok, batched=True).remove_columns(["sentence", "idx"])
+        ds.set_format("torch")
+        return ds
 
-    # Subsample training data
-    n_train = min(args.max_train_samples, len(tokenized_dataset["train"]))
-    train_dataset = tokenized_dataset["train"].select(range(n_train))
-    val_dataset = tokenized_dataset["validation"]
+    splits = {name: make(raw["train"].select(i)) for name, i in idx.items()}
+    val = raw["validation"]
+    if args.debug_small:
+        val = val.select(range(64))
+    splits["val"] = make(val)
+    return splits, D.partition_hash(part)
 
-    collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
 
-    # 2. Model Setup
-    print("\n[2/5] Initializing Model...")
-    model, trainable_params, fraction = get_model(args.model_name, num_labels=2, train_layers=args.train_layers)
+# --------------------------------------------------------------------------- training
+def train_once(args, splits, collator, device, phys_batch):
+    init_seed = D._h(args.seed, "init", args.role) % (2 ** 31)
+    set_seed(init_seed)
+    train_ds = splits[args.role]
+    n_train = len(train_ds)
+    gen = torch.Generator()
+    gen.manual_seed(init_seed)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              collate_fn=collator, generator=gen)
+
+    model, trainable_params, fraction = get_model(args.model_name, 2, args.train_layers, args.freeze_embeddings)
+    gmap = param_groups(model)
     model.to(device)
     model.train()
 
-    # 3. Privacy Engine (Opacus)
-    privacy_engine = None
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(params, lr=args.lr)
+    privacy_engine, sigma, telemetry = None, None, None
+    use_bmm = False
     if args.use_dp:
-        print("\n[3/5] Setting up Differential Privacy (Opacus)...")
         if not ModuleValidator.is_valid(model):
             model = ModuleValidator.fix(model)
             model.to(device)
+            params = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(params, lr=args.lr)
+        sample_rate = 1.0 / len(train_loader)
+        sigma0 = get_noise_multiplier(target_epsilon=args.target_epsilon, target_delta=args.target_delta,
+                                      sample_rate=sample_rate, steps=args.max_steps, accountant="rdp")
+        clip_c, sigma = args.max_grad_norm, sigma0
+        if args.diag_arm == "clip_only":
+            sigma = 0.0
+        elif args.diag_arm == "noise_only":
+            clip_c, sigma = C_BIG, sigma0 * args.max_grad_norm / C_BIG  # same absolute noise std, no clipping
+        privacy_engine = PrivacyEngine(accountant="rdp")
+        model, optimizer, train_loader = privacy_engine.make_private(
+            module=model, optimizer=optimizer, data_loader=train_loader,
+            noise_multiplier=sigma, max_grad_norm=clip_c)
+        telemetry = attach_telemetry(optimizer, gmap, clip_c)
+        use_bmm = True
+        print(f"DP on | arm={args.diag_arm} | sigma0={sigma0:.4f} | used sigma={sigma:.6f} | C={clip_c} | "
+              f"d_trainable={trainable_params:,}")
 
-        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
-        privacy_engine = PrivacyEngine()
-        model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
-            module=model,
-            optimizer=optimizer,
-            data_loader=train_loader,
-            target_epsilon=args.target_epsilon,
-            target_delta=args.target_delta,
-            epochs=args.epochs,
-            max_grad_norm=args.max_grad_norm,
-        )
-        print(f"PrivacyEngine active: Target eps={args.target_epsilon}, delta={args.target_delta}")
-    else:
-        print("\n[3/5] Standard optimization (No DP)...")
-        optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
-
-    # 4. Training Loop
-    print("\n[4/5] Starting Training...")
+    warm = max(1, int(args.warmup_frac * args.max_steps))
+    sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / warm))
     criterion = torch.nn.CrossEntropyLoss()
-    model.train()
-    for epoch in range(args.epochs):
-        total_loss = 0.0
-        for step, batch in enumerate(train_loader):
-            optimizer.zero_grad()
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = (batch["labels"] if "labels" in batch else batch["label"]).to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = criterion(outputs.logits, labels)
-            loss.backward()
-            optimizer.step()
+    losses, steps = [], 0
+    mem = BatchMemoryManager(data_loader=train_loader, max_physical_batch_size=phys_batch,
+                             optimizer=optimizer) if use_bmm else None
+    loader = mem if mem is not None else train_loader
+    ctx = loader if mem is not None else _Null(loader)
+    with ctx as active_loader:
+        while steps < args.max_steps:
+            for batch in active_loader:
+                ids, mask = batch["input_ids"].to(device), batch["attention_mask"].to(device)
+                labels = (batch["labels"] if "labels" in batch else batch["label"]).to(device)
+                loss = criterion(model(input_ids=ids, attention_mask=mask).logits, labels)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                losses.append(loss.item())
+                if not use_bmm or not optimizer._is_last_step_skipped:
+                    steps += 1
+                    sched.step()
+                    if steps % 100 == 0:
+                        print(f"  step {steps}/{args.max_steps} loss(last100)={np.mean(losses[-100:]):.4f}")
+                    if steps >= args.max_steps:
+                        break
 
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(train_loader)
-        eps_str = f" | Epsilon spent: {privacy_engine.get_epsilon(args.target_delta):.2f}" if args.use_dp else ""
-        print(f"  Epoch {epoch + 1}/{args.epochs} - Training Loss: {avg_loss:.4f}{eps_str}")
-
-    # 5. Evaluate Utility & Privacy
-    print("\n[5/5] Evaluating Utility & Auditing Privacy...")
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for batch in val_loader:
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels = (batch["labels"] if "labels" in batch else batch["label"]).to(device)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            preds = torch.argmax(outputs.logits, dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    val_accuracy = (correct / total) * 100
-    print(f"Validation Accuracy: {val_accuracy:.2f}%")
-
-    # Run MIA audit
+    eps_spent = None
+    if args.use_dp and args.diag_arm == "none":
+        eps_spent = float(privacy_engine.get_epsilon(args.target_delta))
     raw_model = model._module if args.use_dp else model
-    audit_train = train_dataset.select(range(min(200, len(train_dataset))))
-    audit_test = val_dataset.select(range(min(200, len(val_dataset))))
-    mia_auc = run_mia_audit(raw_model, audit_train, audit_test, device, collate_fn=collator)
-
-    # 6. Save to CSV
-    os.makedirs("results", exist_ok=True)
-    csv_path = "results/summary.csv"
-    record = {
-        "exp_name": args.exp_name,
-        "train_layers": args.train_layers,
-        "trainable_params": trainable_params,
-        "param_fraction_%": round(fraction, 2),
-        "use_dp": args.use_dp,
-        "target_epsilon": args.target_epsilon if args.use_dp else "None",
-        "val_accuracy": round(val_accuracy, 2),
-        "mia_auc": round(mia_auc, 4),
+    return {
+        "model": raw_model, "trainable_params": trainable_params, "fraction": fraction,
+        "noise_multiplier": sigma, "epsilon_spent": eps_spent, "n_train": n_train,
+        "final_train_loss": float(np.mean(losses[-50:])),
+        "telemetry": summarize_telemetry(telemetry),
     }
 
-    df = pd.DataFrame([record])
-    if not os.path.exists(csv_path):
-        df.to_csv(csv_path, index=False)
-    else:
-        df.to_csv(csv_path, mode="a", header=False, index=False)
 
-    print(f"\n[✓] Results logged successfully to: {csv_path}\n")
+class _Null:
+    def __init__(self, x): self.x = x
+    def __enter__(self): return self.x
+    def __exit__(self, *a): return False
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Active Device: {device} | exp={args.exp_name} seed={args.seed} role={args.role} cfg={args.config}")
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    splits, p_hash = load_splits(args, tokenizer)
+
+    result, phys = None, args.physical_batch
+    while result is None:
+        try:
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats()
+            result = train_once(args, splits, collator, device, phys)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if phys <= 1:
+                raise
+            phys //= 2
+            print(f"[!] CUDA OOM: retrying with physical batch {phys}")
+    peak = torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else 0.0
+
+    model = result["model"]
+    if args.pilot:
+        logits, labels = compute_logits(model, splits["tune"], device, collate_fn=collator)
+        acc = float((logits.argmax(1) == labels).mean() * 100)
+        os.makedirs("results", exist_ok=True)
+        line = (f"{args.exp_name},{args.train_layers},{args.use_dp},{args.lr},{args.seed},"
+                f"{acc:.2f},{result['final_train_loss']:.4f}\n")
+        new = not os.path.exists("results/pilot.csv")
+        with open("results/pilot.csv", "a") as f:
+            if new:
+                f.write("exp_name,train_layers,use_dp,lr,seed,tune_accuracy,final_train_loss\n")
+            f.write(line)
+        print(f"[pilot] tune accuracy {acc:.2f}%")
+        return
+
+    arrays = {}
+    for name in ("A", "B", "out", "pop", "val"):
+        lg, lb = compute_logits(model, splits[name], device, collate_fn=collator)
+        arrays[f"logits_{name}"], arrays[f"labels_{name}"] = lg, lb
+
+    tag_dir = os.path.join(args.cache_dir, f"{args.exp_name}_s{args.seed}")
+    os.makedirs(tag_dir, exist_ok=True)
+    tmp_npz = os.path.join(tag_dir, f"model_{args.role}.tmp.npz")
+    np.savez_compressed(tmp_npz, **arrays)
+    os.replace(tmp_npz, os.path.join(tag_dir, f"model_{args.role}.npz"))
+    meta = {k: v for k, v in result.items() if k != "model"}
+    meta.update({"args": vars(args), "partition_hash": p_hash, "peak_vram_gb": peak,
+                 "physical_batch_used": phys})
+    tmp_json = os.path.join(tag_dir, f"model_{args.role}.tmp.json")
+    with open(tmp_json, "w") as f:
+        json.dump(meta, f, indent=1, default=float)
+    os.replace(tmp_json, os.path.join(tag_dir, f"model_{args.role}.json"))
+    print(f"[✓] cached {tag_dir}/model_{args.role}.npz (peak VRAM {peak:.2f} GB)")
+
 
 if __name__ == "__main__":
     main()
