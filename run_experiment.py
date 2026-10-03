@@ -1,304 +1,424 @@
-"""Train ONE model (role A or B of a swap pair), then cache its logits on every split.
+"""Master subprocess orchestrator for swap-pair training and bidirectional MIA cross-auditing.
 
-All attacks run later, in post-processing, on the cached logits (see run_pair.py / src/audit.py).
-No weights are ever written to disk. Run each role in its own process (run_pair.py does this).
+Implements methodology_audit.md §3.1–§3.3, §4.1 and methodology_audit_addendum.md §4, §6.2:
+  1. Subprocess Isolation:
+     - Model M_A is trained on partition D_A in a clean subprocess, saves logits, and exits.
+     - Model M_B is trained on partition D_B in a clean subprocess, saves logits, and exits.
+     - Guarantees full memory release and zero PyTorch/CUDA leakage across swap pairs.
+  2. CPU Post-Processing & Bidirectional Cross-Audit:
+     - Loads compact cached logits for M_A and M_B across all 5 splits.
+     - Audit 1: Target = M_A, Shadow Reference = M_B, Members = D_A, Non-members = D_out, Population = D_pop.
+     - Audit 2: Target = M_B, Shadow Reference = M_A, Members = D_B, Non-members = D_out, Population = D_pop.
+  3. Results Logging:
+     - Appends exactly two verified 22-column summary rows to results/summary.csv.
 """
 import argparse
-import collections
+import csv
 import json
+import multiprocessing
 import os
-import random
+import shutil
+import sys
+import time
+from pathlib import Path
+from typing import Dict, Any, List
+
+# Ensure project root in sys.path
+project_root = Path(__file__).resolve().parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 import numpy as np
-import torch
 import yaml
-from datasets import load_dataset
-from opacus import PrivacyEngine
-from opacus.accountants.utils import get_noise_multiplier
-from opacus.utils.batch_memory_manager import BatchMemoryManager
-from opacus.validators import ModuleValidator
-from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, DataCollatorWithPadding
 
-from src import data as D
-from src.audit import compute_logits
-from src.models import get_model, param_groups
+from src.data import get_partitions
+from src.audit import evaluate_attacks, load_logits
+from src.train import train_single_model
 
-C_BIG = 1e4  # "clipping off" threshold for the noise-only diagnostic arm
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def build_parser():
-    p = argparse.ArgumentParser()
-    p.add_argument("--config", type=str, default=None, help="YAML hyperparameters; CLI flags override.")
-    p.add_argument("--model_name", type=str, default="roberta-base")
-    p.add_argument("--train_layers", type=str, default="all", help="'all', 'head', or '9,10,11'")
-    p.add_argument("--freeze_embeddings", type=lambda s: s.lower() != "false", default=True)
-    p.add_argument("--use_dp", action="store_true")
-    p.add_argument("--diag_arm", type=str, default="none", choices=["none", "clip_only", "noise_only"],
-                   help="Non-DP diagnostic arms of the 2x2 clipping/noise factorial (needs --use_dp).")
-    p.add_argument("--target_epsilon", type=float, default=5.0)
-    p.add_argument("--target_delta", type=float, default=1e-5)
-    p.add_argument("--max_grad_norm", type=float, default=1.0)
-    p.add_argument("--max_steps", type=int, default=1000)
-    p.add_argument("--batch_size", type=int, default=64, help="Logical batch size")
-    p.add_argument("--physical_batch", type=int, default=16, help="Max physical batch under DP (BatchMemoryManager)")
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--warmup_frac", type=float, default=0.05)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--role", type=str, default="A", choices=["A", "B"])
-    p.add_argument("--exp_name", type=str, default="test_run")
-    p.add_argument("--cache_dir", type=str, default="results/cache")
-    p.add_argument("--pilot", action="store_true",
-                   help="LR pilot: train on D_A, report accuracy on D_tune, write results/pilot.csv only.")
-    p.add_argument("--debug_small", action="store_true", help="Tiny splits for pipeline smoke tests.")
-    return p
+# --------------------------------------------------------------------------- Schema Contract
+CSV_COLUMNS = [
+    "exp_name",
+    "train_layers",
+    "trainable_params",
+    "param_fraction_%",
+    "use_dp",
+    "target_epsilon",
+    "val_accuracy",
+    "mia_auc",
+    "seed",
+    "model_name",
+    "n_train",
+    "epochs",
+    "batch_size",
+    "lr",
+    "target_delta",
+    "max_grad_norm",
+    "noise_multiplier",
+    "epsilon_spent",
+    "final_train_loss",
+    "n_audit_in",
+    "n_audit_out",
+    "mia_tpr_at_1fpr",
+]
 
 
-def parse_args(argv=None):
-    parser = build_parser()
-    pre, _ = parser.parse_known_args(argv)
-    if pre.config:
-        with open(pre.config) as f:
-            cfg = yaml.safe_load(f) or {}
-        valid = {a.dest for a in parser._actions} - {"help", "config"}
-        unknown = set(cfg) - valid
-        if unknown:
-            raise ValueError(f"Unknown keys in {pre.config}: {sorted(unknown)}")
-        if "train_layers" in cfg:
-            cfg["train_layers"] = str(cfg["train_layers"])
-        parser.set_defaults(**cfg)
-    args = parser.parse_args(argv)
-    if args.diag_arm != "none" and not args.use_dp:
-        raise ValueError("--diag_arm requires --use_dp")
-    return args
+def _worker_process(role: str, train_split: str, config: dict, seed: int, output_dir: str, queue: multiprocessing.Queue):
+    """Isolated subprocess worker executing single-model training and logit extraction."""
+    try:
+        telemetry = train_single_model(
+            role=role,
+            train_split_name=train_split,
+            config=config,
+            seed=seed,
+            output_dir=output_dir,
+        )
+        queue.put(("SUCCESS", telemetry))
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        queue.put(("ERROR", str(e), tb))
 
 
-# --------------------------------------------------------------------------- telemetry
-def attach_telemetry(optimizer, gmap, clip_c):
-    """Wraps DPOptimizer to record per-sample grad norms, clip fraction, group energy shares, noise/signal."""
-    st = {"n": 0, "clipped": 0, "norms": [], "share": collections.defaultdict(float), "ns": []}
-    orig_clip, orig_noise = optimizer.clip_and_accumulate, optimizer.add_noise
+def build_summary_row(
+    role: str,
+    exp_name: str,
+    config: dict,
+    seed: int,
+    telemetry: dict,
+    attack_metrics: dict,
+    n_members: int = 1024,
+    n_nonmembers: int = 1024,
+) -> dict:
+    """Builds a single validated 22-column row for results/summary.csv."""
+    trainable_params = int(telemetry.get("trainable_params", 0))
+    total_params = 124647170
+    param_frac = round(100.0 * trainable_params / total_params, 2)
+    use_dp = bool(config.get("use_dp", False))
+    target_eps = config.get("target_epsilon", "None") if use_dp else "None"
+    val_acc = round(float(telemetry.get("val_accuracy", 0.0)), 2)
+    mia_auc = round(float(attack_metrics.get("rmia_auc", attack_metrics.get("loss_auc", 0.5))), 4)
+    max_steps = int(config.get("max_steps", 1000))
+    batch_size = int(config.get("logical_batch_size", config.get("batch_size", 64)))
+    epochs = round((max_steps * batch_size) / n_members, 1)
 
-    def clip_and_accumulate():
-        ps = [p for p in optimizer.params if getattr(p, "grad_sample", None) is not None]
-        sq = collections.defaultdict(lambda: 0.0)
-        for p in ps:
-            g = p.grad_sample.reshape(p.grad_sample.shape[0], -1)
-            sq[gmap[id(p)]] = sq[gmap[id(p)]] + g.float().pow(2).sum(dim=1)
-        total = sum(sq.values())
-        norms = total.sqrt()
-        n = norms.numel()
-        st["n"] += n
-        st["clipped"] += int((norms > clip_c).sum())
-        if len(st["norms"]) < 20000:
-            st["norms"].extend(norms.detach().cpu().tolist())
-        for name, v in sq.items():
-            st["share"][name] += float((v / total.clamp_min(1e-30)).sum())
-        return orig_clip()
+    eps_spent = telemetry.get("epsilon_spent")
+    if eps_spent is not None and use_dp:
+        eps_spent_str = f"{float(eps_spent):.4f}"
+    else:
+        eps_spent_str = ""
 
-    def add_noise():
-        signal = torch.sqrt(sum(p.summed_grad.float().pow(2).sum() for p in optimizer.params))
-        orig_noise()
-        noise = torch.sqrt(sum((p.grad.float() - p.summed_grad.float()).pow(2).sum() for p in optimizer.params))
-        st["ns"].append(float(noise / signal.clamp_min(1e-30)))
+    noise_mult = telemetry.get("noise_multiplier", 0.0)
+    noise_mult_str = f"{float(noise_mult):.4f}" if use_dp else ""
+    target_delta = f"{float(config.get('target_delta', 1e-5)):.1e}" if use_dp else ""
+    max_grad_norm = f"{float(config.get('max_grad_norm', 1.0)):.2f}" if use_dp else ""
 
-    optimizer.clip_and_accumulate, optimizer.add_noise = clip_and_accumulate, add_noise
-    return st
+    row = {
+        "exp_name": f"{exp_name}_{role}",
+        "train_layers": str(config.get("train_layers", "all")),
+        "trainable_params": trainable_params,
+        "param_fraction_%": param_frac,
+        "use_dp": use_dp,
+        "target_epsilon": target_eps,
+        "val_accuracy": val_acc,
+        "mia_auc": mia_auc,
+        "seed": seed,
+        "model_name": config.get("model_name", "roberta-base"),
+        "n_train": n_members,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "lr": float(config.get("lr", 1e-4)),
+        "target_delta": target_delta,
+        "max_grad_norm": max_grad_norm,
+        "noise_multiplier": noise_mult_str,
+        "epsilon_spent": eps_spent_str,
+        "final_train_loss": round(float(telemetry.get("final_loss", 0.0)), 4),
+        "n_audit_in": n_members,
+        "n_audit_out": n_nonmembers,
+        "mia_tpr_at_1fpr": round(float(attack_metrics.get("rmia_tpr_at_1fpr", 0.0)), 4),
+    }
+    return row
 
 
-def summarize_telemetry(st):
-    if not st or st["n"] == 0:
-        return {}
-    norms = np.array(st["norms"])
-    share = {k: v / st["n"] for k, v in st["share"].items()}
+def append_to_summary_csv(csv_path: str, rows: List[dict]):
+    """Safely appends rows to results/summary.csv, archiving incompatible legacy headers."""
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+    need_header = True
+
+    if os.path.exists(csv_path):
+        with open(csv_path, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+        existing_cols = [c.strip() for c in first_line.split(",") if c.strip()]
+        if existing_cols != CSV_COLUMNS:
+            legacy_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "summary_legacy.csv")
+            print(f"[!] Warning: {csv_path} header does not match 22-column schema v2.")
+            print(f"    Archiving existing summary to {legacy_path}")
+            shutil.copy2(csv_path, legacy_path)
+            need_header = True
+            mode = "w"
+        else:
+            need_header = False
+            mode = "a"
+    else:
+        mode = "w"
+
+    with open(csv_path, mode, newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if need_header:
+            writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+    print(f"[✓] Appended {len(rows)} verified 22-column summary rows to {csv_path}")
+
+
+def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/logits", summary_csv: str = "results/summary.csv") -> dict:
+    """Executes the swap pair in isolated subprocesses and performs bidirectional cross-auditing."""
+    exp_name = config.get("exp_name", "experiment")
+    print("\n" + "=" * 70)
+    print(f"MASTER SUBPROCESS ORCHESTRATOR: {exp_name} (Seed {seed})")
+    print(f"Layers: {config.get('train_layers')} | DP: {config.get('use_dp')} | Max Steps: {config.get('max_steps')}")
+    print("=" * 70)
+
+    ctx = multiprocessing.get_context("spawn")
+
+    # 1. Subprocess M_A
+    print(f"\n[1/3] Spawning Subprocess for Target Model M_A (train on D_A)...")
+    q_A = ctx.Queue()
+    p_A = ctx.Process(target=_worker_process, args=("M_A", "A", config, seed, output_dir, q_A))
+    t0_A = time.time()
+    p_A.start()
+    print(f"  Subprocess M_A active with PID: {p_A.pid}")
+    status_A = q_A.get()
+    p_A.join()
+    elapsed_A = time.time() - t0_A
+    if status_A[0] != "SUCCESS":
+        raise RuntimeError(f"Subprocess M_A failed: {status_A[1]}\n{status_A[2]}")
+    if p_A.exitcode != 0:
+        raise RuntimeError(f"Subprocess M_A exited with non-zero code {p_A.exitcode}")
+    res_A = status_A[1]
+    print(f"[✓] Subprocess M_A completed in {elapsed_A:.2f}s and terminated cleanly.")
+
+    # 2. Subprocess M_B
+    print(f"\n[2/3] Spawning Subprocess for Target Model M_B (train on D_B)...")
+    q_B = ctx.Queue()
+    p_B = ctx.Process(target=_worker_process, args=("M_B", "B", config, seed, output_dir, q_B))
+    t0_B = time.time()
+    p_B.start()
+    print(f"  Subprocess M_B active with PID: {p_B.pid}")
+    status_B = q_B.get()
+    p_B.join()
+    elapsed_B = time.time() - t0_B
+    if status_B[0] != "SUCCESS":
+        raise RuntimeError(f"Subprocess M_B failed: {status_B[1]}\n{status_B[2]}")
+    if p_B.exitcode != 0:
+        raise RuntimeError(f"Subprocess M_B exited with non-zero code {p_B.exitcode}")
+    res_B = status_B[1]
+    print(f"[✓] Subprocess M_B completed in {elapsed_B:.2f}s and terminated cleanly.")
+
+    # 3. CPU Post-Processing & Bidirectional Cross-Audit
+    print(f"\n[3/3] CPU Post-Processing & Bidirectional Cross-Audit...")
+    partitions = get_partitions(seed=seed)
+    member_labels_A = np.array([it["label"] for it in partitions["D_A"]], dtype=np.int64)
+    member_labels_B = np.array([it["label"] for it in partitions["D_B"]], dtype=np.int64)
+    nonmember_labels = np.array([it["label"] for it in partitions["D_out"]], dtype=np.int64)
+    pop_labels = np.array([it["label"] for it in partitions["D_pop"]], dtype=np.int64)
+
+    # Load M_A logit caches
+    logits_A_DA = load_logits(os.path.join(output_dir, f"M_A_{exp_name}_seed{seed}_D_A.npy"))
+    logits_A_DB = load_logits(os.path.join(output_dir, f"M_A_{exp_name}_seed{seed}_D_B.npy"))
+    logits_A_Dout = load_logits(os.path.join(output_dir, f"M_A_{exp_name}_seed{seed}_D_out.npy"))
+    logits_A_Dpop = load_logits(os.path.join(output_dir, f"M_A_{exp_name}_seed{seed}_D_pop.npy"))
+
+    # Load M_B logit caches
+    logits_B_DA = load_logits(os.path.join(output_dir, f"M_B_{exp_name}_seed{seed}_D_A.npy"))
+    logits_B_DB = load_logits(os.path.join(output_dir, f"M_B_{exp_name}_seed{seed}_D_B.npy"))
+    logits_B_Dout = load_logits(os.path.join(output_dir, f"M_B_{exp_name}_seed{seed}_D_out.npy"))
+    logits_B_Dpop = load_logits(os.path.join(output_dir, f"M_B_{exp_name}_seed{seed}_D_pop.npy"))
+
+    # Audit 1: Target = M_A, Shadow Reference = M_B
+    # Members = D_A, Non-members = D_out, Population = D_pop
+    metrics_A = evaluate_attacks(
+        target_logits=(logits_A_DA, logits_A_Dout),
+        ref_logits=(logits_B_DA, logits_B_Dout),
+        member_labels=member_labels_A,
+        nonmember_labels=nonmember_labels,
+        pop_target_logits=logits_A_Dpop,
+        pop_ref_logits=logits_B_Dpop,
+        pop_labels=pop_labels,
+        alpha=0.0,
+        gamma=1.0,
+    )
+
+    # Audit 2: Target = M_B, Shadow Reference = M_A
+    # Members = D_B, Non-members = D_out, Population = D_pop
+    metrics_B = evaluate_attacks(
+        target_logits=(logits_B_DB, logits_B_Dout),
+        ref_logits=(logits_A_DB, logits_A_Dout),
+        member_labels=member_labels_B,
+        nonmember_labels=nonmember_labels,
+        pop_target_logits=logits_B_Dpop,
+        pop_ref_logits=logits_A_Dpop,
+        pop_labels=pop_labels,
+        alpha=0.0,
+        gamma=1.0,
+    )
+
+    print("\n" + "=" * 70)
+    print(f"BIDIRECTIONAL CROSS-AUDIT METRICS: {exp_name} (Seed {seed})")
+    print("=" * 70)
+    print(f"Target M_A (Trained on D_A, Shadow Reference M_B):")
+    print(f"  Val Accuracy:       {res_A['val_accuracy']:.2f}%")
+    print(f"  Final Train Loss:   {res_A['final_loss']:.4f}")
+    print(f"  RMIA AUC (Primary): {metrics_A['rmia_auc']:.4f}")
+    print(f"  Loss AUC (Naive):   {metrics_A['loss_auc']:.4f}")
+    print(f"  RMIA Quantile AUC:  {metrics_A['rmia_quant_auc']:.4f}")
+    print(f"  RMIA TPR @ 5% FPR:  {metrics_A['rmia_tpr_at_5fpr']:.4f}")
+    print(f"  RMIA TPR @ 1% FPR:  {metrics_A['rmia_tpr_at_1fpr']:.4f}")
+    print(f"  Calibration Gap:    {metrics_A['calibration_gap']:.4f}")
+    print(f"  Generalization Gap: {metrics_A['generalization_gap']:.4f}")
+
+    print(f"\nTarget M_B (Trained on D_B, Shadow Reference M_A):")
+    print(f"  Val Accuracy:       {res_B['val_accuracy']:.2f}%")
+    print(f"  Final Train Loss:   {res_B['final_loss']:.4f}")
+    print(f"  RMIA AUC (Primary): {metrics_B['rmia_auc']:.4f}")
+    print(f"  Loss AUC (Naive):   {metrics_B['loss_auc']:.4f}")
+    print(f"  RMIA Quantile AUC:  {metrics_B['rmia_quant_auc']:.4f}")
+    print(f"  RMIA TPR @ 5% FPR:  {metrics_B['rmia_tpr_at_5fpr']:.4f}")
+    print(f"  RMIA TPR @ 1% FPR:  {metrics_B['rmia_tpr_at_1fpr']:.4f}")
+    print(f"  Calibration Gap:    {metrics_B['calibration_gap']:.4f}")
+    print(f"  Generalization Gap: {metrics_B['generalization_gap']:.4f}")
+
+    # Build and append the two summary rows
+    row_A = build_summary_row("M_A", exp_name, config, seed, res_A, metrics_A)
+    row_B = build_summary_row("M_B", exp_name, config, seed, res_B, metrics_B)
+    append_to_summary_csv(summary_csv, [row_A, row_B])
+
     return {
-        "clip_fraction": st["clipped"] / st["n"],
-        "median_grad_norm": float(np.median(norms)),
-        "p10_grad_norm": float(np.percentile(norms, 10)),
-        "p90_grad_norm": float(np.percentile(norms, 90)),
-        "head_energy_share": share.get("head", 0.0),
-        "group_energy_share": share,
-        "noise_signal_ratio": float(np.mean(st["ns"])) if st["ns"] else None,
+        "exp_name": exp_name,
+        "seed": seed,
+        "M_A": {"telemetry": res_A, "metrics": metrics_A, "row": row_A},
+        "M_B": {"telemetry": res_B, "metrics": metrics_B, "row": row_B},
     }
 
 
-# --------------------------------------------------------------------------- data
-def load_splits(args, tokenizer):
-    raw = load_dataset("nyu-mll/glue", "sst2")
-    sizes = ({"A": 32, "B": 32, "out": 32, "pop": 32, "tune": 64} if args.debug_small else D.SPLIT_SIZES)
-    items = D.assign_families(D.build_pool(raw["train"]["sentence"], raw["train"]["label"]))
-    part = D.make_partition(items, args.seed, sizes)
-    idx = D.partition_indices(part)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Master Subprocess Orchestrator for Swap-Pair Fine-Tuning & MIA Audit")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file.")
+    parser.add_argument("--dry_run", action="store_true", help="Execute rapid dry run on CPU (5 steps).")
+    parser.add_argument("--exp_name", type=str, default=None, help="Experiment identifier name.")
+    parser.add_argument("--model_name", type=str, default="roberta-base")
+    parser.add_argument("--train_layers", type=str, default=None, help="'all', 'head', or comma-separated indices e.g. '0,1,2'")
+    parser.add_argument("--freeze_embeddings", type=lambda s: s.lower() != "false", default=True)
+    parser.add_argument("--use_dp", action="store_true", help="Enable Opacus DP-SGD.")
+    parser.add_argument("--target_epsilon", type=float, default=None)
+    parser.add_argument("--target_delta", type=float, default=None)
+    parser.add_argument("--max_grad_norm", type=float, default=None)
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None, help="Logical batch size")
+    parser.add_argument("--logical_batch_size", type=int, default=None)
+    parser.add_argument("--physical_batch_size", type=int, default=None)
+    parser.add_argument("--physical_batch", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output_dir", type=str, default="results/logits")
+    parser.add_argument("--summary_csv", type=str, default="results/summary.csv")
 
-    def tok(examples):
-        return tokenizer(examples["sentence"], truncation=True, max_length=128)
+    args = parser.parse_args()
 
-    def make(ds):
-        ds = ds.map(tok, batched=True).remove_columns(["sentence", "idx"])
-        ds.set_format("torch")
-        return ds
+    config = {}
+    if args.config:
+        with open(args.config, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
 
-    splits = {name: make(raw["train"].select(i)) for name, i in idx.items()}
-    val = raw["validation"]
-    if args.debug_small:
-        val = val.select(range(64))
-    splits["val"] = make(val)
-    return splits, D.partition_hash(part)
+    # CLI flags override YAML config
+    if args.exp_name is not None:
+        config["exp_name"] = args.exp_name
+    elif "exp_name" not in config:
+        if args.config:
+            config["exp_name"] = Path(args.config).stem
+        else:
+            config["exp_name"] = "dry_run" if args.dry_run else "experiment"
 
+    if args.train_layers is not None:
+        config["train_layers"] = str(args.train_layers)
+    elif "train_layers" not in config:
+        config["train_layers"] = "head" if args.dry_run else "all"
 
-# --------------------------------------------------------------------------- training
-def train_once(args, splits, collator, device, phys_batch):
-    init_seed = D._h(args.seed, "init", args.role) % (2 ** 31)
-    set_seed(init_seed)
-    train_ds = splits[args.role]
-    n_train = len(train_ds)
-    gen = torch.Generator()
-    gen.manual_seed(init_seed)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                              collate_fn=collator, generator=gen)
+    if args.use_dp or "use_dp" not in config:
+        config["use_dp"] = args.use_dp or config.get("use_dp", False)
 
-    model, trainable_params, fraction = get_model(args.model_name, 2, args.train_layers, args.freeze_embeddings)
-    gmap = param_groups(model)
-    model.to(device)
-    model.train()
+    if args.target_epsilon is not None:
+        config["target_epsilon"] = args.target_epsilon
+    elif "target_epsilon" not in config and config.get("use_dp"):
+        config["target_epsilon"] = 5.0
 
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(params, lr=args.lr)
-    privacy_engine, sigma, telemetry = None, None, None
-    use_bmm = False
-    if args.use_dp:
-        if not ModuleValidator.is_valid(model):
-            model = ModuleValidator.fix(model)
-            model.to(device)
-            params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = torch.optim.AdamW(params, lr=args.lr)
-        sample_rate = 1.0 / len(train_loader)
-        sigma0 = get_noise_multiplier(target_epsilon=args.target_epsilon, target_delta=args.target_delta,
-                                      sample_rate=sample_rate, steps=args.max_steps, accountant="rdp")
-        clip_c, sigma = args.max_grad_norm, sigma0
-        if args.diag_arm == "clip_only":
-            sigma = 0.0
-        elif args.diag_arm == "noise_only":
-            clip_c, sigma = C_BIG, sigma0 * args.max_grad_norm / C_BIG  # same absolute noise std, no clipping
-        privacy_engine = PrivacyEngine(accountant="rdp")
-        model, optimizer, train_loader = privacy_engine.make_private(
-            module=model, optimizer=optimizer, data_loader=train_loader,
-            noise_multiplier=sigma, max_grad_norm=clip_c)
-        telemetry = attach_telemetry(optimizer, gmap, clip_c)
-        use_bmm = True
-        print(f"DP on | arm={args.diag_arm} | sigma0={sigma0:.4f} | used sigma={sigma:.6f} | C={clip_c} | "
-              f"d_trainable={trainable_params:,}")
+    if args.target_delta is not None:
+        config["target_delta"] = args.target_delta
+    elif "target_delta" not in config:
+        config["target_delta"] = 1.0e-5
 
-    warm = max(1, int(args.warmup_frac * args.max_steps))
-    sched = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / warm))
-    criterion = torch.nn.CrossEntropyLoss()
+    if args.max_grad_norm is not None:
+        config["max_grad_norm"] = args.max_grad_norm
+    elif "max_grad_norm" not in config:
+        config["max_grad_norm"] = 1.0
 
-    losses, steps = [], 0
-    mem = BatchMemoryManager(data_loader=train_loader, max_physical_batch_size=phys_batch,
-                             optimizer=optimizer) if use_bmm else None
-    loader = mem if mem is not None else train_loader
-    ctx = loader if mem is not None else _Null(loader)
-    with ctx as active_loader:
-        while steps < args.max_steps:
-            for batch in active_loader:
-                ids, mask = batch["input_ids"].to(device), batch["attention_mask"].to(device)
-                labels = (batch["labels"] if "labels" in batch else batch["label"]).to(device)
-                loss = criterion(model(input_ids=ids, attention_mask=mask).logits, labels)
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                losses.append(loss.item())
-                if not use_bmm or not optimizer._is_last_step_skipped:
-                    steps += 1
-                    sched.step()
-                    if steps % 100 == 0:
-                        print(f"  step {steps}/{args.max_steps} loss(last100)={np.mean(losses[-100:]):.4f}")
-                    if steps >= args.max_steps:
-                        break
+    if args.max_steps is not None:
+        config["max_steps"] = args.max_steps
+    elif "max_steps" not in config:
+        config["max_steps"] = 5 if args.dry_run else 1000
 
-    eps_spent = None
-    if args.use_dp and args.diag_arm == "none":
-        eps_spent = float(privacy_engine.get_epsilon(args.target_delta))
-    raw_model = model._module if args.use_dp else model
-    return {
-        "model": raw_model, "trainable_params": trainable_params, "fraction": fraction,
-        "noise_multiplier": sigma, "epsilon_spent": eps_spent, "n_train": n_train,
-        "final_train_loss": float(np.mean(losses[-50:])),
-        "telemetry": summarize_telemetry(telemetry),
-    }
+    b = args.logical_batch_size or args.batch_size
+    if b is not None:
+        config["logical_batch_size"] = b
+    elif "logical_batch_size" not in config:
+        config["logical_batch_size"] = 16 if args.dry_run else 64
+
+    pb = args.physical_batch_size or args.physical_batch
+    if pb is not None:
+        config["physical_batch_size"] = pb
+    elif "physical_batch_size" not in config:
+        config["physical_batch_size"] = 8 if args.dry_run else 16
+
+    if args.lr is not None:
+        config["lr"] = args.lr
+    elif "lr" not in config:
+        config["lr"] = 1e-3 if args.dry_run else (3e-4 if config.get("use_dp") else 3e-5)
+
+    if args.model_name is not None:
+        config["model_name"] = args.model_name
+
+    config["freeze_embeddings"] = args.freeze_embeddings
+
+    # Dry run presets
+    if args.dry_run:
+        if args.max_steps is None:
+            config["max_steps"] = 5
+        if b is None:
+            config["logical_batch_size"] = 16
+        if pb is None:
+            config["physical_batch_size"] = 8
+
+    return args, config
 
 
-class _Null:
-    def __init__(self, x): self.x = x
-    def __enter__(self): return self.x
-    def __exit__(self, *a): return False
+def main():
+    args, config = parse_args()
+    seed = args.seed
+    output_dir = args.output_dir
+    summary_csv = args.summary_csv
 
+    t_start = time.time()
+    results = run_orchestrator(
+        config=config,
+        seed=seed,
+        output_dir=output_dir,
+        summary_csv=summary_csv,
+    )
+    total_time = time.time() - t_start
 
-def main(argv=None):
-    args = parse_args(argv)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Active Device: {device} | exp={args.exp_name} seed={args.seed} role={args.role} cfg={args.config}")
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    collator = DataCollatorWithPadding(tokenizer=tokenizer)
-    splits, p_hash = load_splits(args, tokenizer)
-
-    result, phys = None, args.physical_batch
-    while result is None:
-        try:
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats()
-            result = train_once(args, splits, collator, device, phys)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            if phys <= 1:
-                raise
-            phys //= 2
-            print(f"[!] CUDA OOM: retrying with physical batch {phys}")
-    peak = torch.cuda.max_memory_allocated() / 1e9 if device.type == "cuda" else 0.0
-
-    model = result["model"]
-    if args.pilot:
-        logits, labels = compute_logits(model, splits["tune"], device, collate_fn=collator)
-        acc = float((logits.argmax(1) == labels).mean() * 100)
-        os.makedirs("results", exist_ok=True)
-        line = (f"{args.exp_name},{args.train_layers},{args.use_dp},{args.lr},{args.seed},"
-                f"{acc:.2f},{result['final_train_loss']:.4f}\n")
-        new = not os.path.exists("results/pilot.csv")
-        with open("results/pilot.csv", "a") as f:
-            if new:
-                f.write("exp_name,train_layers,use_dp,lr,seed,tune_accuracy,final_train_loss\n")
-            f.write(line)
-        print(f"[pilot] tune accuracy {acc:.2f}%")
-        return
-
-    arrays = {}
-    for name in ("A", "B", "out", "pop", "val"):
-        lg, lb = compute_logits(model, splits[name], device, collate_fn=collator)
-        arrays[f"logits_{name}"], arrays[f"labels_{name}"] = lg, lb
-
-    tag_dir = os.path.join(args.cache_dir, f"{args.exp_name}_s{args.seed}")
-    os.makedirs(tag_dir, exist_ok=True)
-    tmp_npz = os.path.join(tag_dir, f"model_{args.role}.tmp.npz")
-    np.savez_compressed(tmp_npz, **arrays)
-    os.replace(tmp_npz, os.path.join(tag_dir, f"model_{args.role}.npz"))
-    meta = {k: v for k, v in result.items() if k != "model"}
-    meta.update({"args": vars(args), "partition_hash": p_hash, "peak_vram_gb": peak,
-                 "physical_batch_used": phys})
-    tmp_json = os.path.join(tag_dir, f"model_{args.role}.tmp.json")
-    with open(tmp_json, "w") as f:
-        json.dump(meta, f, indent=1, default=float)
-    os.replace(tmp_json, os.path.join(tag_dir, f"model_{args.role}.json"))
-    print(f"[✓] cached {tag_dir}/model_{args.role}.npz (peak VRAM {peak:.2f} GB)")
+    print("\n" + "=" * 70)
+    print(f"SWAP-PAIR RUN COMPLETE in {total_time:.2f}s")
+    print(f"Summary log: {summary_csv}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

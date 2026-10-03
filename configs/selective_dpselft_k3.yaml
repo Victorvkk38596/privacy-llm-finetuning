@@ -1,0 +1,15 @@
+# DP-SelFT selected layers (3,6,4), DP-SGD epsilon_ft = 4.7, epsilon_sel = 0.3
+exp_name: selective_dpselft_k3
+model_name: roberta-base
+train_layers: "3,6,4"
+freeze_embeddings: true
+use_dp: true
+target_epsilon: 4.7
+epsilon_sel: 0.3
+target_delta: 1.0e-5
+max_grad_norm: 1.0
+lr: 3.0e-4
+max_steps: 1000
+logical_batch_size: 64
+physical_batch_size: 16
+seed: 42

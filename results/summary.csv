@@ -1,3 +1,3 @@
-exp_name,train_layers,trainable_params,param_fraction_%,use_dp,target_epsilon,val_accuracy,mia_auc
-smoke_test,head,592130,0.48,False,None,49.08,0.6022
-kaggle_gpu_head_eps5,head,592130,0.48,True,5.0,49.08,0.49
+exp_name,train_layers,trainable_params,param_fraction_%,use_dp,target_epsilon,val_accuracy,mia_auc,seed,model_name,n_train,epochs,batch_size,lr,target_delta,max_grad_norm,noise_multiplier,epsilon_spent,final_train_loss,n_audit_in,n_audit_out,mia_tpr_at_1fpr
+dry_run_M_A,head,592130,0.48,False,None,49.08,0.5055,42,roberta-base,1024,0.1,16,0.001,,,,,0.8911,1024,1024,0.0068
+dry_run_M_B,head,592130,0.48,False,None,49.08,0.5018,42,roberta-base,1024,0.1,16,0.001,,,,,1.2795,1024,1024,0.0068

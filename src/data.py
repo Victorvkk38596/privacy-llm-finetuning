@@ -15,6 +15,7 @@ import os
 import re
 import unicodedata
 
+from datasets import load_dataset
 import numpy as np
 from scipy import stats
 
@@ -343,6 +344,34 @@ def partition_hash(part) -> str:
 def partition_indices(part):
     """{split: [original train row indices]} (for datasets.Dataset.select)."""
     return PartitionDict({n: [it["idx"] for it in v] for n, v in part.items()})
+
+
+_PARTITIONS_CACHE = {}
+
+
+def get_partitions(seed: int = 42, sizes: dict = None) -> dict:
+    """Returns partitions dict for the given seed with keys:
+    'A', 'B', 'out', 'pop', 'tune', 'D_A', 'D_B', 'D_out', 'D_pop', 'D_tune', and 'validation'.
+    Each split contains items with 'raw' and 'label' (plus 'key', 'idx', etc.).
+    Standard SST-2 validation (872 items) is loaded under 'validation' and 'val'.
+    """
+    cache_key = (seed, tuple(sorted((sizes or {}).items())))
+    if cache_key in _PARTITIONS_CACHE:
+        return _PARTITIONS_CACHE[cache_key]
+
+    raw_train = load_dataset("nyu-mll/glue", "sst2", split="train")
+    clean_items = build_pool(raw_train["sentence"], raw_train["label"])
+    forest_items = assign_families(clean_items)
+    part = make_partition(forest_items, seed=seed, sizes=sizes)
+
+    # Load standard SST-2 validation
+    raw_val = load_dataset("nyu-mll/glue", "sst2", split="validation")
+    val_items = [{"raw": ex["sentence"], "label": int(ex["label"]), "idx": i} for i, ex in enumerate(raw_val)]
+    part["validation"] = val_items
+    part["val"] = val_items
+
+    _PARTITIONS_CACHE[cache_key] = part
+    return part
 
 
 if __name__ == "__main__":

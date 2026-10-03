@@ -13,6 +13,7 @@ Score convention everywhere: higher score => more likely a training member.
 """
 import os
 import re
+from collections.abc import Mapping
 import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score, roc_curve
@@ -34,10 +35,9 @@ def extract_logits(model, dataloader, device) -> np.ndarray:
     all_logits = []
     with torch.no_grad():
         for batch in dataloader:
-            if isinstance(batch, dict):
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                out = model(input_ids=input_ids, attention_mask=attention_mask)
+            if isinstance(batch, Mapping):
+                kwargs = {k: v.to(device) for k, v in batch.items() if k in ("input_ids", "attention_mask", "token_type_ids")}
+                out = model(**kwargs)
             elif isinstance(batch, (tuple, list)):
                 input_ids = batch[0].to(device)
                 attention_mask = batch[1].to(device) if len(batch) > 1 else None

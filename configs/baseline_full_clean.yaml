@@ -1,11 +1,12 @@
-# Full fine-tuning, no DP (epsilon = infinity). Hyperparameters are shared by all configs (ARCHITECTURE I-R6).
+# Full fine-tuning clean baseline (frozen embeddings), epsilon = infinity
 exp_name: baseline_full_clean
 model_name: roberta-base
 train_layers: "all"
+freeze_embeddings: true
 use_dp: false
-epochs: 5
-batch_size: 32
-lr: 5.0e-5
-max_train_samples: 1024
-audit_size: 500
+lr: 3.0e-5
+max_steps: 1000
+logical_batch_size: 64
+physical_batch_size: 16
+target_delta: 1.0e-5
 seed: 42

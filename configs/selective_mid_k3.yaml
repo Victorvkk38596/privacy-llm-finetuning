@@ -1,14 +1,14 @@
-# Mid layers 4,5,6 (+ head), DP-SGD epsilon = 5.0
+# Selective mid layers (4,5,6), DP-SGD epsilon = 5.0
 exp_name: selective_mid_k3
 model_name: roberta-base
 train_layers: "4,5,6"
+freeze_embeddings: true
 use_dp: true
 target_epsilon: 5.0
 target_delta: 1.0e-5
 max_grad_norm: 1.0
-epochs: 5
-batch_size: 32
-lr: 5.0e-5
-max_train_samples: 1024
-audit_size: 500
+lr: 3.0e-4
+max_steps: 1000
+logical_batch_size: 64
+physical_batch_size: 16
 seed: 42

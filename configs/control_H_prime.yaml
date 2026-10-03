@@ -1,0 +1,14 @@
+# Selection-matched control H' (9,10,11), DP-SGD epsilon = 4.7
+exp_name: control_H_prime
+model_name: roberta-base
+train_layers: "9,10,11"
+freeze_embeddings: true
+use_dp: true
+target_epsilon: 4.7
+target_delta: 1.0e-5
+max_grad_norm: 1.0
+lr: 3.0e-4
+max_steps: 1000
+logical_batch_size: 64
+physical_batch_size: 16
+seed: 42
