@@ -112,11 +112,15 @@ def train_single_model(
     freeze_embeddings = config.get("freeze_embeddings", True)
     use_dp = config.get("use_dp", False)
     max_steps = int(config.get("max_steps", 1000))
-    lr = float(config.get("lr", 1e-4 if not use_dp else 5e-4))
-    weight_decay = float(config.get("weight_decay", 0.01))
+    lr = float(config.get("lr", 1e-4 if not use_dp else 1e-3))
+    # For DP runs always use weight_decay=0: L2 regularisation on noisy gradients
+    # pulls weights steadily toward zero and accelerates collapse to majority-class.
+    weight_decay = float(config.get("weight_decay", 0.0))
     warmup_frac = float(config.get("warmup_frac", 0.05))
     clip_c = float(config.get("max_grad_norm", 1.0))
     max_length = int(config.get("max_length", 128))
+    # Steps for clean head pre-alignment before DP wrapping (disabled for non-DP runs)
+    head_warmup_steps = int(config.get("head_warmup_steps", 100)) if use_dp else 0
 
     logical_batch_size = int(config.get("logical_batch_size", config.get("batch_size", 64)))
     physical_batch_size = int(config.get("physical_batch_size", config.get("physical_batch", 16)))
@@ -162,13 +166,59 @@ def train_single_model(
         freeze_embeddings=freeze_embeddings,
     )
     model.to(device)
+
+    # ------------------------------------------------------------------
+    # Head warmup (clean, before PrivacyEngine): aligns the randomly
+    # initialised classification head with pretrained representations.
+    # This is the most impactful fix for DP utility collapse.
+    # ------------------------------------------------------------------
+    if use_dp and head_warmup_steps > 0:
+        print(f"[{role}] Running {head_warmup_steps}-step clean head warmup (lr=1e-3, no DP)...")
+        head_warmup_lr = float(config.get("head_warmup_lr", 1e-3))
+        warmup_head_optimizer = torch.optim.AdamW(
+            list(model.classifier.parameters()),
+            lr=head_warmup_lr,
+            weight_decay=0.0,
+        )
+        model.train()
+        warmup_loader_iter = iter(train_loader)
+        warmup_step = 0
+        while warmup_step < head_warmup_steps:
+            try:
+                batch = next(warmup_loader_iter)
+            except StopIteration:
+                warmup_loader_iter = iter(train_loader)
+                batch = next(warmup_loader_iter)
+            warmup_head_optimizer.zero_grad()
+            batch_inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch_inputs)
+            outputs.loss.backward()
+            warmup_head_optimizer.step()
+            warmup_step += 1
+        del warmup_head_optimizer
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        print(f"[{role}] Head warmup complete. Final warmup loss: {outputs.loss.item():.4f}")
+
     model.train()
 
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=lr,
-        weight_decay=weight_decay,
-    )
+    # Separate param groups: head (randomly initialised) needs a higher LR
+    # than the pretrained backbone layers.
+    head_params = [p for n, p in model.named_parameters()
+                   if "classifier" in n and p.requires_grad]
+    backbone_params = [p for n, p in model.named_parameters()
+                       if "classifier" not in n and p.requires_grad]
+    optimizer_groups = []
+    if backbone_params:
+        optimizer_groups.append({"params": backbone_params, "lr": lr, "weight_decay": weight_decay})
+    if head_params:
+        # Head gets 3× backbone LR; this ratio is robust across DP budgets.
+        optimizer_groups.append({"params": head_params, "lr": lr * 3.0, "weight_decay": 0.0})
+    if not optimizer_groups:
+        # Fallback: all trainable params
+        optimizer_groups = [{"params": [p for p in model.parameters() if p.requires_grad],
+                             "lr": lr, "weight_decay": weight_decay}]
+    optimizer = torch.optim.AdamW(optimizer_groups)
+    print(f"[{role}] Optimizer: backbone_lr={lr:.2e}, head_lr={lr * 3.0:.2e}, weight_decay={weight_decay}")
 
     # 3. Setup DP Engine or Standard Scheduler
     privacy_engine = None
@@ -180,11 +230,21 @@ def train_single_model(
         if not ModuleValidator.is_valid(model):
             model = ModuleValidator.fix(model)
             model.to(device)
-            optimizer = torch.optim.AdamW(
-                [p for p in model.parameters() if p.requires_grad],
-                lr=lr,
-                weight_decay=weight_decay,
-            )
+            # Rebuild differential-LR param groups after ModuleValidator.fix()
+            # rewrites LayerNorm layers (parameter keys may shift).
+            _head_params = [p for n, p in model.named_parameters()
+                            if "classifier" in n and p.requires_grad]
+            _backbone_params = [p for n, p in model.named_parameters()
+                                if "classifier" not in n and p.requires_grad]
+            _groups = []
+            if _backbone_params:
+                _groups.append({"params": _backbone_params, "lr": lr, "weight_decay": weight_decay})
+            if _head_params:
+                _groups.append({"params": _head_params, "lr": lr * 3.0, "weight_decay": 0.0})
+            if not _groups:
+                _groups = [{"params": [p for p in model.parameters() if p.requires_grad],
+                            "lr": lr, "weight_decay": weight_decay}]
+            optimizer = torch.optim.AdamW(_groups)
 
         sample_rate = logical_batch_size / len(train_items)
         noise_multiplier = get_noise_multiplier(

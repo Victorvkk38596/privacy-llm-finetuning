@@ -7,8 +7,11 @@ use_dp: true
 target_epsilon: 5.0
 target_delta: 1.0e-5
 max_grad_norm: 1.0
-lr: 3.0e-4
-max_steps: 1000
+lr: 1.0e-3
+weight_decay: 0.0
+head_warmup_steps: 100
+head_warmup_lr: 1.0e-3
+max_steps: 300
 logical_batch_size: 64
 physical_batch_size: 16
 seed: 42
