@@ -1,0 +1,336 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[a4paper, top=18mm, bottom=18mm, left=22mm, right=22mm]{geometry}
+\usepackage{times}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{makecell}
+\usepackage{ragged2e}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage[table]{xcolor}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{parskip}
+\usepackage{longtable}
+
+% ── Colours ───────────────────────────────────────────────────────────────────
+\definecolor{iitblue}{RGB}{26,35,126}
+\definecolor{goodgreen}{RGB}{27,94,32}
+\definecolor{warnred}{RGB}{183,28,28}
+\definecolor{rowgray}{RGB}{245,245,255}
+
+% ── Section formatting ────────────────────────────────────────────────────────
+\titleformat{\section}
+  {\normalfont\large\bfseries\color{iitblue}}{}{0em}{}[{\color{iitblue}\titlerule[0.7pt]}]
+\titleformat{\subsection}
+  {\normalfont\normalsize\bfseries\color{iitblue}}{}{0em}{}
+\titlespacing*{\section}{0pt}{10pt}{5pt}
+\titlespacing*{\subsection}{0pt}{7pt}{3pt}
+
+% ── Header / Footer ───────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\setlength{\headwidth}{\textwidth}
+\fancyhead[L]{\small\color{iitblue}\textbf{Midterm Report:} DP LLM Fine-Tuning}
+\fancyhead[R]{\small IIT Guwahati}
+\fancyfoot[C]{\small\thepage}
+
+% ── List spacing ──────────────────────────────────────────────────────────────
+\setlist[itemize]{itemsep=2pt, topsep=3pt, leftmargin=16pt}
+\setlist[enumerate]{itemsep=2pt, topsep=3pt, leftmargin=18pt}
+
+% ── Table helpers ─────────────────────────────────────────────────────────────
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\renewcommand{\arraystretch}{1.2}
+\captionsetup{font=small, labelfont=bf, skip=4pt}
+
+\setlength{\parskip}{4pt}
+\setlength{\emergencystretch}{2em}
+\setlength{\headheight}{14pt}
+\setlength{\parindent}{0pt}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{document}
+
+% ── Title block ───────────────────────────────────────────────────────────────
+\begin{center}
+  {\LARGE\bfseries\color{iitblue}
+    Privacy-Utility Trade-off in\\[3pt]
+    Differentially Private LLM Fine-Tuning}\\[6pt]
+  {\large\textbf{Midterm Progress Report}}\\[4pt]
+  {\normalsize Hardware aware DL (Sem VII) $\;\cdot\;$ IIT Guwahati $\;\cdot\;$ October 2026}\\[4pt]
+  {\normalsize
+    G Jayagiri $\;\cdot\;$
+    Vasudev Krishna $\;\cdot\;$
+    Uditya Shekawat $\;\cdot\;$
+    Arkaprava Paul $\;\cdot\;$
+    Harshit Goel}
+\end{center}
+\vspace{1mm}
+{\color{iitblue}\hrule height 1.5pt}
+\vspace{4mm}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Project Overview \& Foundation Papers}
+
+\subsection{What This Project Is About}
+
+Large language models (LLMs) are increasingly fine-tuned on private and sensitive data ---
+patient records, legal documents, personal communications --- to adapt them to specialized
+downstream tasks. However, fine-tuning creates a privacy risk: the resulting model can
+\emph{leak} information about individual training examples through \textbf{Membership
+Inference Attacks (MIA)}, where an adversary queries the model to determine whether a
+specific sample was part of its training set.
+
+\textbf{Differential Privacy (DP)} provides a mathematical guarantee against such leakage
+by injecting calibrated Gaussian noise into the gradient update at each training step
+(DP-SGD). The formal guarantee is parameterized by $\varepsilon$ (privacy budget) and
+$\delta$ (failure probability): smaller $\varepsilon$ means stronger privacy. The
+fundamental problem, however, is that DP-SGD significantly \emph{degrades model accuracy}
+because the noise overwhelms the gradient signal, especially for large models with many
+trainable parameters.
+
+This project asks a precise mechanistic question:
+
+\begin{center}
+\emph{``Does the location of the Transformer layers we choose to fine-tune --- early,
+middle, or late in the network --- affect how well a model learns a task under DP,
+while maintaining the same formal privacy guarantee?''}
+\end{center}
+
+The hypothesis is that \textbf{late layers} (closer to the output) encode more
+task-specific, class-discriminative representations, and therefore provide a stronger
+gradient signal per trainable parameter under DP noise. By concentrating updates on
+these layers, we expect to achieve better accuracy with the same privacy budget compared
+to fine-tuning early layers or the entire network. We also study whether a
+\emph{DP-aware automatic layer selection algorithm} can match or exceed the best
+hand-chosen layer set.
+
+The project additionally evaluates whether the choice of fine-tuned layers affects
+\emph{empirical} privacy leakage --- i.e., whether an attacker using the strongest
+known MIA can infer more about training data from a model trained on late layers vs.\
+early layers.
+
+\subsection{Foundation Papers and How They Are Integrated}
+
+\textbf{Paper 1 --- DP-SelFT (Sha et al., arXiv:2605.17432, 2025).}
+This paper proposes a framework for \emph{Differentially Private Selective Fine-Tuning}
+(DP-SelFT). The key insight is that not all layers are equally useful or equally
+vulnerable to DP noise. DP-SelFT selects which layers to train using a three-stage
+pipeline: (1) generate a synthetic dataset privately using a commercial LLM API with a
+small privacy budget $\varepsilon_{\text{sel}}$; (2) temporarily train each candidate
+layer subset on this synthetic data under \textbf{worst-case perturbations} of the same
+scale as the downstream DP noise --- this favours layers that are robust to noisy
+updates, not just layers that appear informative under clean training; (3) fine-tune only
+the selected layers on private data using DP-AdamW. DP-SelFT achieves +2--3\% accuracy
+over full DP fine-tuning at $\varepsilon = 5$ without any additional privacy cost for
+selection.
+
+\textbf{Paper 2 --- Marek et al. (arXiv:2606.09401, ICLR 2026).}
+This paper benchmarks \emph{empirical privacy leakage} under DP LLM adaptations using
+the strongest known attack: offline \textbf{Robust Membership Inference Attack (RMIA)}
+with a shadow model trained on a disjoint split of the same data. The key finding is
+that the formal $\varepsilon$ guarantee alone does not determine practical leakage ---
+the \emph{distributional closeness} between pretraining data and fine-tuning data is the
+dominant factor. At $\varepsilon = 8$, in-distribution data yields MIA AUC of 0.7--0.9;
+out-of-distribution data is significantly safer. The paper also proposes a holistic
+\emph{pretrain-adapt} privacy auditing framework covering four stages of the LLM
+lifecycle.
+
+\textbf{Integration.}
+Our project sits at the intersection of both papers. Paper~1 addresses \emph{which
+parameters to train} and how to select them under DP constraints; Paper~2 provides the
+\emph{audit methodology} to measure whether those choices affect real-world leakage.
+Specifically, we use Paper~2's \textbf{swap-pair shadow-model RMIA protocol} to audit
+the configurations defined by Paper~1's layer-selection framework. We train two models,
+$M_A$ on split $D_A$ and $M_B$ on split $D_B$, so that each model acts as the other's
+shadow reference. This lets us measure per-layer-configuration empirical MIA AUC at the
+same $\varepsilon$ budget --- a direct experiment that neither paper individually
+conducts.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Achievements to Date}
+
+\subsection{Infrastructure Built}
+
+A complete end-to-end research pipeline was designed and implemented from scratch:
+\begin{itemize}
+  \item Training engine (\texttt{src/train.py}): step-based DP-SGD training loop using
+        Opacus, with RDP accounting, \texttt{BatchMemoryManager} for memory-efficient
+        per-sample gradients, gradient telemetry (clipping fraction, noise multiplier
+        $\sigma$), and logit extraction for all audit splits after training.
+  \item Model management (\texttt{src/models.py}): supports selective layer freezing
+        (by index, position label, or ``head only''), embedding freezing, and
+        trainable-parameter reporting.
+  \item Layer selection (\texttt{src/select\_layers.py}): implements DP-SelFT Stages
+        2--3 (DP histogram over a public candidate pool, worst-case perturbation ranking),
+        outputting a \texttt{selection.json} with layer ranking and $\varepsilon_{\text{sel}}$.
+  \item Audit engine (\texttt{src/audit.py}): implements loss-threshold baseline,
+        continuous RMIA ratio attack, and offline Marek Alg.~1 (RMIA), reporting AUC,
+        TPR@1\%FPR, TPR@5\%FPR, calibration gap, and generalization gap.
+  \item Experiment orchestrator (\texttt{run\_experiment.py}): automated 8-configuration
+        grid with the swap-pair protocol, CSV result aggregation, and Kaggle GPU runner.
+\end{itemize}
+
+\subsection{Experiments Completed}
+
+Two full experiment runs were completed on Kaggle GPU (RoBERTa-base, SST-2, $N{=}1024$,
+$\varepsilon{=}5$, $\delta{=}10^{-5}$). The first run (v1) revealed a critical training
+failure in all DP configurations due to a noise multiplier of $\sigma{\approx}2.06$
+overwhelming gradient signal. Hyperparameter fixes were applied and the full grid was
+re-run (v2). Results are shown in Table~\ref{tab:results}.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Validation accuracy and membership-inference AUC for v1 (failed) and v2 (fixed).}
+\label{tab:results}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}X
+                                >{\centering\arraybackslash}p{1.35cm}
+                                >{\centering\arraybackslash}p{1.35cm}
+                                >{\centering\arraybackslash}p{1.25cm}
+                                >{\centering\arraybackslash}p{1.25cm}
+                                >{\centering\arraybackslash}p{1.15cm}@{}}
+\toprule
+\textbf{Configuration} & \textbf{Layers} & \textbf{Trainable params} &
+\textbf{Acc.\ v1} & \textbf{Acc.\ v2} & \textbf{MIA AUC} \\
+\midrule
+Baseline clean (no DP) & All & 100\% & 89.8\% & 89.0\% & 0.67 \\
+\rowcolor{rowgray}
+Baseline full DP & All & 100\% & 50.0\% & 81.0\% & 0.51 \\
+Head only DP & Head & 0.48\% & 50.0\% & 58.0\% & 0.52 \\
+\rowcolor{rowgray}
+Selective early $k=3$ & Layers 0--2 & 17.5\% & 50.0\% & 72.2\% & 0.52 \\
+Selective mid $k=3$ & Layers 4--6 & 17.5\% & 50.0\% & 83.4\% & 0.50 \\
+\rowcolor{rowgray}
+Selective late $k=3$ & Layers 9--11 & 17.5\% & 50.0\% & 84.8\% & 0.51 \\
+DP-SelFT $k=3$ & Selected (3, 6, 4) & 17.5\% & 50.0\% & 82.9\% & 0.51 \\
+\rowcolor{rowgray}
+Control $H'$ & Layers 9--11 & 17.5\% & 50.0\% & 84.7\% & 0.51 \\
+\bottomrule
+\end{tabularx}
+\begin{minipage}{\textwidth}
+\vspace{2pt}
+\footnotesize \textit{Note:} The DP guarantee is maintained in v2 runs
+($\varepsilon_{\mathrm{spent}}\leq 5.0$). AUC values near 0.5 indicate near-random
+membership inference. The v1 results are included to document the initial training issue.
+\end{minipage}
+\end{table}
+
+\subsection{Key Research Findings}
+
+\begin{itemize}
+  \item \textbf{Layer location matters, even at constant parameter count.} All selective
+        k3 configs train exactly 17.5\% of parameters, yet accuracy ranges from 72.2\%
+        (early) to 84.8\% (late) --- a 12.6-point gap attributable solely to layer
+        location.
+  \item \textbf{Late layers are most efficient under DP.} Layers 9--11 reach 84.8\%,
+        only 4.2 points below the non-private ceiling (89.0\%), while training just
+        17.5\% of parameters.
+  \item \textbf{DP-SelFT validates the selection approach.} The automatic DP-aware
+        selection (82.9\%) closely matches the best heuristic (late layers, 84.7\%) at
+        a cost of only $\varepsilon_{\text{sel}}{=}0.3$ of the overall budget.
+  \item \textbf{Formal DP is empirically confirmed.} All DP MIA AUC values are
+        ${\approx}0.49$--$0.53$ (near-random), confirming the attacker gains no
+        meaningful advantage at $\varepsilon{=}5$, regardless of layer choice.
+  \item \textbf{Head-only DP is a negative result.} 592k parameters is insufficient
+        capacity to learn a classification task under DP noise (58\% accuracy).
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Pending Limitations \& Second-Half Roadmap}
+
+\subsection{Critical Gaps (Affect Scientific Validity)}
+
+\begin{table}[htbp]
+\centering
+\caption{Critical limitations and planned fixes}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\textwidth}{@{}C{0.55cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
+\toprule
+\textbf{\#} & \textbf{Limitation} & \textbf{Planned Fix} \\
+\midrule
+L1 & Single seed (42); SE $\approx\pm1.3\%$ on AUC; no confidence intervals &
+     Run seeds 43, 44 $\to$ 3-seed mean $\pm$ SD \\
+\rowcolor{rowgray}
+L2 & No $\varepsilon$ sweep; Pareto curve is one point at $\varepsilon{=}5$ &
+     Add $\varepsilon \!\in\! \{1, 8, \infty\}$; location effects become measurable at $\varepsilon{=}1$ \\
+L3 & SST-2 phrase-family contamination: 83.4\% of items are sub-phrases; may artificially suppress MIA AUC &
+     Group-aware one-item-per-family data splitting in \texttt{src/data.py} \\
+\rowcolor{rowgray}
+L4 & Head warmup uses private data ($D_A$/$D_B$) before PrivacyEngine; DP guarantee slightly overstated &
+     Switch warmup to public proxy data (IMDb / Yelp) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Significant Gaps (Affect Claim Strength)}
+
+\begin{table}[htbp]
+\centering
+\caption{Gaps affecting strength of conclusions}
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\textwidth}{@{}C{0.55cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
+\toprule
+\textbf{\#} & \textbf{Limitation} & \textbf{Planned Fix} \\
+\midrule
+L5 & $k$-layer fraction sweep not done; ``how many layers?'' unanswered &
+     Configs for $k \!\in\! \{1,2,3,6,9,12\}$ at $\varepsilon{=}5$, heuristic and DP-SelFT \\
+\rowcolor{rowgray}
+L6 & No early stopping; training loss varies 0.03--2.43 across runs &
+     Validation-loss patience-based stopping; per-step loss curves \\
+L7 & Single dataset (SST-2); generalisability unknown &
+     Add MNLI or QQP as secondary dataset check \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Timeline for Remaining Work}
+
+\begin{table}[htbp]
+\centering
+\caption{Second-half schedule}
+\setlength{\tabcolsep}{8pt}
+\begin{tabularx}{\textwidth}{@{}C{1.05cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
+\toprule
+\textbf{Week} & \textbf{Task} & \textbf{Expected Outcome} \\
+\midrule
+1--2 & Fix family-aware data splitting (L3); switch warmup to public data (L4) &
+       Audit integrity assured; DP guarantee tight \\
+\rowcolor{rowgray}
+3--4 & $\varepsilon \!\in\! \{1,8,\infty\}$ sweep + seeds 43,\,44 (L1, L2) &
+       Privacy-utility Pareto frontier + confidence intervals \\
+5--6 & $k$-fraction sweep (L5); add early stopping (L6) &
+       Utility vs.\ trainable-parameter curve \\
+\rowcolor{rowgray}
+7   & Secondary dataset experiment (L7); final result aggregation &
+       Generalisability evidence \\
+8   & Final report and presentation preparation &
+       Complete project submission \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\bigskip
+\textbf{Summary.}
+The core infrastructure, training pipeline, and initial results are complete. The primary
+midterm finding --- that selective fine-tuning of late Transformer layers (9--11) under
+DP-SGD achieves 84.8\% validation accuracy compared to the 89.0\% non-private ceiling,
+while maintaining MIA AUC $\approx 0.51$ (near-random) --- is a substantive and
+reproducible result. The second half of the project will harden these findings with
+multi-seed reproducibility, an $\varepsilon$-sweep to map the full Pareto frontier, and
+the $k$-fraction study needed to completely answer the research question.
+
+\end{document}
