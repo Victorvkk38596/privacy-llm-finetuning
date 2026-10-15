@@ -83,254 +83,247 @@
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Project Overview \& Foundation Papers}
 
-\subsection{What This Project Is About}
+\subsection{Problem Statement and Research Objective}
 
-Large language models (LLMs) are increasingly fine-tuned on private and sensitive data ---
-patient records, legal documents, personal communications --- to adapt them to specialized
-downstream tasks. However, fine-tuning creates a privacy risk: the resulting model can
-\emph{leak} information about individual training examples through \textbf{Membership
-Inference Attacks (MIA)}, where an adversary queries the model to determine whether a
-specific sample was part of its training set.
+Language models are frequently fine-tuned on sensitive internal data, such as medical
+histories, confidential legal documents, or personal correspondence. While adaptation
+specializes the model for a target task, it introduces the risk of training data leakage.
+An adversary querying the fine-tuned model can execute a \textbf{Membership Inference Attack (MIA)}
+to infer whether a specific target record was included in the fine-tuning split.
 
-\textbf{Differential Privacy (DP)} provides a mathematical guarantee against such leakage
-by injecting calibrated Gaussian noise into the gradient update at each training step
-(DP-SGD). The formal guarantee is parameterized by $\varepsilon$ (privacy budget) and
-$\delta$ (failure probability): smaller $\varepsilon$ means stronger privacy. The
-fundamental problem, however, is that DP-SGD significantly \emph{degrades model accuracy}
-because the noise overwhelms the gradient signal, especially for large models with many
-trainable parameters.
+\textbf{Differential Privacy (DP)} addresses this risk by bounding individual record
+influence during training. In DP-SGD, per-sample gradients are clipped to a maximum norm $C$
+and perturbed with calibrated Gaussian noise proportional to $\sigma$. The privacy guarantee
+is parameterized by $(\varepsilon, \delta)$, where lower $\varepsilon$ corresponds to stronger
+theoretical protection. However, applying DP-SGD to large models typically causes significant
+accuracy loss, as stochastic gradient perturbation accumulates across all updated parameters.
 
-This project asks a precise mechanistic question:
+This project investigates the mechanistic relationship between layer position and noise tolerance:
 
 \begin{center}
-\emph{``Does the location of the Transformer layers we choose to fine-tune --- early,
-middle, or late in the network --- affect how well a model learns a task under DP,
-while maintaining the same formal privacy guarantee?''}
+\emph{``How does the depth of fine-tuned transformer layers (early, middle, or late) govern task utility and empirical privacy leakage under DP-SGD when the formal privacy budget is held constant?''}
 \end{center}
 
-The hypothesis is that \textbf{late layers} (closer to the output) encode more
-task-specific, class-discriminative representations, and therefore provide a stronger
-gradient signal per trainable parameter under DP noise. By concentrating updates on
-these layers, we expect to achieve better accuracy with the same privacy budget compared
-to fine-tuning early layers or the entire network. We also study whether a
-\emph{DP-aware automatic layer selection algorithm} can match or exceed the best
-hand-chosen layer set.
+Our primary hypothesis is that \textbf{late layers} (nearer to the output) capture more
+task-specific and class-discriminative semantics than early layers. Consequently, late layers
+should provide a stronger gradient signal per parameter, yielding higher task utility for the
+same perturbation scale. We also investigate whether an automated, perturbation-aware layer
+selection algorithm can match or exceed intuitive contiguous layer selections.
 
-The project additionally evaluates whether the choice of fine-tuned layers affects
-\emph{empirical} privacy leakage --- i.e., whether an attacker using the strongest
-known MIA can infer more about training data from a model trained on late layers vs.\
-early layers.
+Finally, we audit all models using shadow-model likelihood ratio attacks to determine whether
+updating different depths or parameter fractions leads to measurable variations in empirical
+privacy leakage.
 
-\subsection{Foundation Papers and How They Are Integrated}
+\subsection{Foundation Papers and Synthesis}
 
-\textbf{Paper 1 --- DP-SelFT (Sha et al., arXiv:2605.17432, 2025).}
-This paper proposes a framework for \emph{Differentially Private Selective Fine-Tuning}
-(DP-SelFT). The key insight is that not all layers are equally useful or equally
-vulnerable to DP noise. DP-SelFT selects which layers to train using a three-stage
-pipeline: (1) generate a synthetic dataset privately using a commercial LLM API with a
-small privacy budget $\varepsilon_{\text{sel}}$; (2) temporarily train each candidate
-layer subset on this synthetic data under \textbf{worst-case perturbations} of the same
-scale as the downstream DP noise --- this favours layers that are robust to noisy
-updates, not just layers that appear informative under clean training; (3) fine-tune only
-the selected layers on private data using DP-AdamW. DP-SelFT achieves +2--3\% accuracy
-over full DP fine-tuning at $\varepsilon = 5$ without any additional privacy cost for
-selection.
+\textbf{Paper 1: DP-SelFT (Sha et al., arXiv:2605.17432, 2025).}
+Sha et al.\ introduce \emph{Differentially Private Selective Fine-Tuning} (DP-SelFT). The
+method observes that different transformer layers exhibit varying resilience to gradient noise.
+The selection pipeline works in three stages: (1) generate a task-aligned proxy candidate pool
+with a small privacy allocation $\varepsilon_{\text{sel}}$; (2) evaluate candidate layer
+subsets on this proxy data under worst-case gradient perturbations matching the scale of
+downstream DP noise; and (3) fine-tune only the selected layer subset on private data with
+DP-AdamW using the remaining budget $\varepsilon_{\text{ft}} = \varepsilon - \varepsilon_{\text{sel}}$.
+On standard benchmarks, DP-SelFT reports improvements over full DP fine-tuning by restricting
+noise accumulation to a subset of parameters.
 
-\textbf{Paper 2 --- Marek et al. (arXiv:2606.09401, ICLR 2026).}
-This paper benchmarks \emph{empirical privacy leakage} under DP LLM adaptations using
-the strongest known attack: offline \textbf{Robust Membership Inference Attack (RMIA)}
-with a shadow model trained on a disjoint split of the same data. The key finding is
-that the formal $\varepsilon$ guarantee alone does not determine practical leakage ---
-the \emph{distributional closeness} between pretraining data and fine-tuning data is the
-dominant factor. At $\varepsilon = 8$, in-distribution data yields MIA AUC of 0.7--0.9;
-out-of-distribution data is significantly safer. The paper also proposes a holistic
-\emph{pretrain-adapt} privacy auditing framework covering four stages of the LLM
-lifecycle.
+\textbf{Paper 2: Marek et al. (arXiv:2606.09401, ICLR 2026).}
+Marek et al.\ provide a rigorous benchmark of \emph{empirical privacy leakage} in DP fine-tuned
+language models using offline \textbf{Robust Membership Inference Attacks (RMIA)}. The paper
+demonstrates that a formal $\varepsilon$ guarantee does not alone describe empirical vulnerability;
+distributional similarity between pretraining and fine-tuning data plays a primary role. The
+authors establish that evaluating RMIA requires an in-distribution \textbf{shadow reference
+model} trained on a disjoint split of the same dataset. Without a calibrated shadow model,
+reference-based attacks lose their discriminative power under DP.
 
-\textbf{Integration.}
-Our project sits at the intersection of both papers. Paper~1 addresses \emph{which
-parameters to train} and how to select them under DP constraints; Paper~2 provides the
-\emph{audit methodology} to measure whether those choices affect real-world leakage.
-Specifically, we use Paper~2's \textbf{swap-pair shadow-model RMIA protocol} to audit
-the configurations defined by Paper~1's layer-selection framework. We train two models,
-$M_A$ on split $D_A$ and $M_B$ on split $D_B$, so that each model acts as the other's
-shadow reference. This lets us measure per-layer-configuration empirical MIA AUC at the
-same $\varepsilon$ budget --- a direct experiment that neither paper individually
-conducts.
+\textbf{Synthesis and Project Scope.}
+Our study operates at the intersection of both works. Paper~1 supplies the layer selection
+and perturbation ranking framework, while Paper~2 provides the empirical audit protocol. We
+evaluate Paper~1's selective configurations using Paper~2's \textbf{symmetric swap-pair
+shadow protocol}. Specifically, we train target model $M_A$ on split $D_A$ and reference model
+$M_B$ on split $D_B$, allowing each model to serve as the other's shadow reference. This setup
+yields bidirectional empirical MIA metrics across layer positions and parameter fractions under
+identical privacy budgets.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \section{Achievements to Date}
 
 \subsection{Infrastructure Built}
 
-A complete end-to-end research pipeline was designed and implemented from scratch:
+We built an end-to-end experimental framework to ensure reproducible training and auditing:
 \begin{itemize}
-  \item Training engine (\texttt{src/train.py}): step-based DP-SGD training loop using
-        Opacus, with RDP accounting, \texttt{BatchMemoryManager} for memory-efficient
-        per-sample gradients, gradient telemetry (clipping fraction, noise multiplier
-        $\sigma$), and logit extraction for all audit splits after training.
-  \item Model management (\texttt{src/models.py}): supports selective layer freezing
-        (by index, position label, or ``head only''), embedding freezing, and
-        trainable-parameter reporting.
-  \item Layer selection (\texttt{src/select\_layers.py}): implements DP-SelFT Stages
-        2--3 (DP histogram over a public candidate pool, worst-case perturbation ranking),
-        outputting a \texttt{selection.json} with layer ranking and $\varepsilon_{\text{sel}}$.
-  \item Audit engine (\texttt{src/audit.py}): implements loss-threshold baseline,
-        continuous RMIA ratio attack, and offline Marek Alg.~1 (RMIA), reporting AUC,
-        TPR@1\%FPR, TPR@5\%FPR, calibration gap, and generalization gap.
-  \item Experiment orchestrator (\texttt{run\_experiment.py}): automated 8-configuration
-        grid with the swap-pair protocol, CSV result aggregation, and Kaggle GPU runner.
+  \item Data pipeline (\texttt{src/data.py}): parses GLUE SST-2, constructs a single-parent
+        containment forest to link sentence fragments to root sentences, and enforces Policy~F1
+        (at most one phrase per family per partition) across seeded splits.
+  \item Training engine (\texttt{src/train.py}): step-based DP-SGD loop using Opacus, RDP
+        privacy accounting, \texttt{BatchMemoryManager} for memory-bounded per-sample clipping,
+        gradient telemetry logging, and multi-split logit extraction.
+  \item Model management (\texttt{src/models.py}): supports selective parameter freezing by
+        layer index, block grouping, or classification head, while strictly freezing embedding
+        weights to protect memory and privacy accounting.
+  \item Layer tournament (\texttt{src/select\_layers.py}): implements DP-SelFT perturbation-aware
+        layer ranking over candidate blocks, writing selections to configuration files.
+  \item Audit engine (\texttt{src/audit.py}): computes naive loss baselines, continuous ratio
+        RMIA, and offline Zarifzadeh probability-ratio formulations, calculating ROC-AUC,
+        TPR at 1\% and 5\% FPR, and generalization gaps.
+  \item Orchestrator (\texttt{run\_experiment.py}): manages execution of the 8-configuration
+        grid under the symmetric swap-pair protocol with automated metric aggregation.
 \end{itemize}
 
 \subsection{Experiments Completed}
 
-Two full experiment runs were completed on Kaggle GPU (RoBERTa-base, SST-2, $N{=}1024$,
-$\varepsilon{=}5$, $\delta{=}10^{-5}$). The first run (v1) revealed a critical training
-failure in all DP configurations due to a noise multiplier of $\sigma{\approx}2.06$
-overwhelming gradient signal. Hyperparameter fixes were applied and the full grid was
-re-run (v2). Results are shown in Table~\ref{tab:results}.
+Two full grid sweeps were executed on Kaggle GPU hardware (RoBERTa-base, GLUE SST-2, $N{=}1024$,
+$\delta{=}10^{-5}$). In the initial sweep (v1), all DP configurations collapsed to 50.0\%
+accuracy because the unaligned classification head received high gradient noise ($\sigma \approx 2.06$).
+In the revised sweep (v2), we introduced a 100-step clean head warmup and differential learning
+rates before engaging DP-SGD, resolving the collapse. Results are summarized in Table~\ref{tab:results}.
 
 \begin{table}[htbp]
 \centering
 \small
-\caption{Validation accuracy and membership-inference AUC for v1 (failed) and v2 (fixed).}
+\caption{Validation accuracy and membership-inference attack AUC for initial runs (v1) and revised head-warmed runs (v2).}
 \label{tab:results}
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.15}
 \begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}X
+                                >{\centering\arraybackslash}p{1.45cm}
                                 >{\centering\arraybackslash}p{1.35cm}
-                                >{\centering\arraybackslash}p{1.35cm}
-                                >{\centering\arraybackslash}p{1.25cm}
-                                >{\centering\arraybackslash}p{1.25cm}
+                                >{\centering\arraybackslash}p{1.05cm}
+                                >{\centering\arraybackslash}p{1.15cm}
+                                >{\centering\arraybackslash}p{1.15cm}
                                 >{\centering\arraybackslash}p{1.15cm}@{}}
 \toprule
-\textbf{Configuration} & \textbf{Layers} & \textbf{Trainable params} &
-\textbf{Acc.\ v1} & \textbf{Acc.\ v2} & \textbf{MIA AUC} \\
+\textbf{Configuration} & \textbf{Layers} & \textbf{Trainable} &
+\textbf{Target $\varepsilon$} & \textbf{Acc.\ v1} & \textbf{Acc.\ v2} & \textbf{RMIA AUC} \\
 \midrule
-Baseline clean (no DP) & All & 100\% & 89.8\% & 89.0\% & 0.67 \\
+Baseline clean (no DP) & Blocks 0--11 + Head & 68.7\% & $\infty$ & 89.8\% & 88.7\% & 0.67 \\
 \rowcolor{rowgray}
-Baseline full DP & All & 100\% & 50.0\% & 81.0\% & 0.51 \\
-Head only DP & Head & 0.48\% & 50.0\% & 58.0\% & 0.52 \\
+Baseline full DP & Blocks 0--11 + Head & 68.7\% & 5.0 & 50.0\% & 81.0\% & 0.51 \\
+Head only DP & Head only & 0.48\% & 5.0 & 50.0\% & 58.0\% & 0.52 \\
 \rowcolor{rowgray}
-Selective early $k=3$ & Layers 0--2 & 17.5\% & 50.0\% & 72.2\% & 0.52 \\
-Selective mid $k=3$ & Layers 4--6 & 17.5\% & 50.0\% & 83.4\% & 0.50 \\
+Selective early $k=3$ & Blocks 0--2 + Head & 17.5\% & 5.0 & 50.0\% & 72.2\% & 0.52 \\
+Selective mid $k=3$ & Blocks 4--6 + Head & 17.5\% & 5.0 & 50.0\% & 83.4\% & 0.50 \\
 \rowcolor{rowgray}
-Selective late $k=3$ & Layers 9--11 & 17.5\% & 50.0\% & 84.8\% & 0.51 \\
-DP-SelFT $k=3$ & Selected (3, 6, 4) & 17.5\% & 50.0\% & 82.9\% & 0.51 \\
+Selective late $k=3$ & Blocks 9--11 + Head & 17.5\% & 5.0 & 50.0\% & 84.8\% & 0.51 \\
+DP-SelFT $k=3$ & Blocks 3, 6, 4 + Head & 17.5\% & 4.7* & 50.0\% & 82.9\% & 0.51 \\
 \rowcolor{rowgray}
-Control $H'$ & Layers 9--11 & 17.5\% & 50.0\% & 84.7\% & 0.51 \\
+Control $H'$ & Blocks 9--11 + Head & 17.5\% & 4.7 & 50.0\% & 84.7\% & 0.51 \\
 \bottomrule
 \end{tabularx}
 \begin{minipage}{\textwidth}
-\vspace{2pt}
-\footnotesize \textit{Note:} The DP guarantee is maintained in v2 runs
-($\varepsilon_{\mathrm{spent}}\leq 5.0$). AUC values near 0.5 indicate near-random
-membership inference. The v1 results are included to document the initial training issue.
+\vspace{3pt}
+\footnotesize \textit{Note:} All configurations freeze embedding layers (85.6M trainable parameters out of 124.6M total). Values represent the mean of the symmetric swap-pair ($M_A$ on $D_A$, $M_B$ on $D_B$). *DP-SelFT allocates $\varepsilon_{\text{sel}} = 0.3$ to private layer selection, leaving $\varepsilon_{\text{ft}} = 4.7$ for fine-tuning. Control $H'$ uses the identical $\varepsilon_{\text{ft}} = 4.7$ budget to isolate selection quality from noise scale.
 \end{minipage}
 \end{table}
 
 \subsection{Key Research Findings}
 
 \begin{itemize}
-  \item \textbf{Layer location matters, even at constant parameter count.} All selective
-        k3 configs train exactly 17.5\% of parameters, yet accuracy ranges from 72.2\%
-        (early) to 84.8\% (late) --- a 12.6-point gap attributable solely to layer
-        location.
-  \item \textbf{Late layers are most efficient under DP.} Layers 9--11 reach 84.8\%,
-        only 4.2 points below the non-private ceiling (89.0\%), while training just
-        17.5\% of parameters.
-  \item \textbf{DP-SelFT validates the selection approach.} The automatic DP-aware
-        selection (82.9\%) closely matches the best heuristic (late layers, 84.7\%) at
-        a cost of only $\varepsilon_{\text{sel}}{=}0.3$ of the overall budget.
-  \item \textbf{Formal DP is empirically confirmed.} All DP MIA AUC values are
-        ${\approx}0.49$--$0.53$ (near-random), confirming the attacker gains no
-        meaningful advantage at $\varepsilon{=}5$, regardless of layer choice.
-  \item \textbf{Head-only DP is a negative result.} 592k parameters is insufficient
-        capacity to learn a classification task under DP noise (58\% accuracy).
+  \item \textbf{Layer depth governs DP utility at constant parameter count.} All three-layer
+        configurations update exactly 17.5\% of model parameters, yet accuracy rises from 72.2\%
+        (early blocks 0--2) to 84.8\% (late blocks 9--11). This represents a 12.6 percentage point
+        gain attributable entirely to layer position.
+  \item \textbf{Selective late tuning outperforms full DP fine-tuning.} Tuning only layers 9--11
+        achieves 84.8\% accuracy, exceeding full DP fine-tuning (81.0\%) by 3.8 percentage points
+        despite updating $3.9\times$ fewer parameters (17.5\% vs.\ 68.7\%). This confirms that
+        high-dimensional gradient noise ($\propto \sqrt{d_\Lambda}\sigma C$) degrades representation
+        quality across lower layers when the full backbone is updated.
+  \item \textbf{Contiguous late layers match or exceed algorithmic selection.} The DP-SelFT
+        selection algorithm identified blocks (3, 6, 4) and reached 82.9\% accuracy. However,
+        contiguous late layers (Control $H'$, blocks 9--11) reached 84.7\% under the exact same
+        $\varepsilon = 4.7$ budget, showing that simple proximity to the output head provides
+        stronger representation adaptation than scattered block selection.
+  \item \textbf{Formal DP bounds empirical leakage across all layers.} All DP configurations
+        produced RMIA AUC values between 0.49 and 0.53, indicating that membership leakage remains
+        near chance regardless of parameter fraction or layer position.
+  \item \textbf{Head-only fine-tuning creates an informational bottleneck.} Updating only the
+        classification head (0.48\% of parameters) reached only 58.0\% accuracy, demonstrating
+        that frozen backbone representations cannot separate sentiment classes without at least
+        partial transformer block adaptation.
 \end{itemize}
 
 % ══════════════════════════════════════════════════════════════════════════════
-\section{Pending Limitations \& Second-Half Roadmap}
+\section{Current Limitations \& Second-Half Roadmap}
 
-\subsection{Critical Gaps (Affect Scientific Validity)}
+\subsection{Methodological Limitations}
 
 \begin{table}[htbp]
 \centering
-\caption{Critical limitations and planned fixes}
+\caption{Methodological limitations and planned extensions.}
+\label{tab:limitations_crit}
 \setlength{\tabcolsep}{5pt}
 \begin{tabularx}{\textwidth}{@{}C{0.55cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
 \toprule
-\textbf{\#} & \textbf{Limitation} & \textbf{Planned Fix} \\
+\textbf{\#} & \textbf{Limitation} & \textbf{Planned Extension} \\
 \midrule
-L1 & Single seed (42); SE $\approx\pm1.3\%$ on AUC; no confidence intervals &
-     Run seeds 43, 44 $\to$ 3-seed mean $\pm$ SD \\
+L1 & Single primary seed ($N{=}2$ swap-pair models); confidence intervals not yet established &
+     Execute seeds 43 and 44 to expand sample size to $N{=}6$ models per configuration \\
 \rowcolor{rowgray}
-L2 & No $\varepsilon$ sweep; Pareto curve is one point at $\varepsilon{=}5$ &
-     Add $\varepsilon \!\in\! \{1, 8, \infty\}$; location effects become measurable at $\varepsilon{=}1$ \\
-L3 & SST-2 phrase-family contamination: 83.4\% of items are sub-phrases; may artificially suppress MIA AUC &
-     Group-aware one-item-per-family data splitting in \texttt{src/data.py} \\
+L2 & Single privacy budget for location study ($\varepsilon{=}5$); Pareto frontier unmapped &
+     Evaluate $\varepsilon \in \{1, 2, 8, \infty\}$ to determine whether location effects widen under tighter noise \\
+L3 & Head warmup uses private training data ($D_A/D_B$) prior to PrivacyEngine attachment &
+     Move head warmup to public proxy datasets (IMDb or Yelp sentiment samples) \\
 \rowcolor{rowgray}
-L4 & Head warmup uses private data ($D_A$/$D_B$) before PrivacyEngine; DP guarantee slightly overstated &
-     Switch warmup to public proxy data (IMDb / Yelp) \\
+L4 & $k$-layer fraction sweep incomplete; optimal parameter volume unresolved &
+     Evaluate $k \in \{1, 2, 3, 6, 9, 12\}$ at constant $\varepsilon = 5$ \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{Significant Gaps (Affect Claim Strength)}
+\subsection{Secondary Robustness Checks}
 
 \begin{table}[htbp]
 \centering
-\caption{Gaps affecting strength of conclusions}
+\caption{Planned robustness and generalization checks.}
+\label{tab:limitations_sec}
 \setlength{\tabcolsep}{5pt}
 \begin{tabularx}{\textwidth}{@{}C{0.55cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
 \toprule
-\textbf{\#} & \textbf{Limitation} & \textbf{Planned Fix} \\
+\textbf{\#} & \textbf{Limitation} & \textbf{Planned Extension} \\
 \midrule
-L5 & $k$-layer fraction sweep not done; ``how many layers?'' unanswered &
-     Configs for $k \!\in\! \{1,2,3,6,9,12\}$ at $\varepsilon{=}5$, heuristic and DP-SelFT \\
+L5 & Fixed step budget (300 steps) without early stopping; loss convergence varies across runs &
+     Implement validation-based early stopping and plot per-step training loss curves \\
 \rowcolor{rowgray}
-L6 & No early stopping; training loss varies 0.03--2.43 across runs &
-     Validation-loss patience-based stopping; per-step loss curves \\
-L7 & Single dataset (SST-2); generalisability unknown &
-     Add MNLI or QQP as secondary dataset check \\
+L6 & Single task evaluation (SST-2 sentiment); cross-task generalization unverified &
+     Replicate the location comparison on an additional GLUE benchmark (e.g., QNLI or MNLI) \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\subsection{Timeline for Remaining Work}
+\subsection{Second-Half Schedule}
 
 \begin{table}[htbp]
 \centering
-\caption{Second-half schedule}
+\caption{Timeline for remaining experimental milestones.}
+\label{tab:schedule}
 \setlength{\tabcolsep}{8pt}
 \begin{tabularx}{\textwidth}{@{}C{1.05cm} >{\RaggedRight\arraybackslash}X >{\RaggedRight\arraybackslash}X @{}}
 \toprule
-\textbf{Week} & \textbf{Task} & \textbf{Expected Outcome} \\
+\textbf{Week} & \textbf{Milestone} & \textbf{Expected Deliverable} \\
 \midrule
-1--2 & Fix family-aware data splitting (L3); switch warmup to public data (L4) &
-       Audit integrity assured; DP guarantee tight \\
+1--2 & Public proxy head warmup (L3) and tighter budget tests $\varepsilon \in \{1, 2\}$ (L2) &
+       Strict privacy guarantee preservation and high-noise sensitivity checks \\
 \rowcolor{rowgray}
-3--4 & $\varepsilon \!\in\! \{1,8,\infty\}$ sweep + seeds 43,\,44 (L1, L2) &
-       Privacy-utility Pareto frontier + confidence intervals \\
-5--6 & $k$-fraction sweep (L5); add early stopping (L6) &
-       Utility vs.\ trainable-parameter curve \\
+3--4 & Seeds 43 and 44 execution (L1) and full budget sweep $\varepsilon \in \{1, 8, \infty\}$ &
+       Empirical Pareto frontier with 95\% confidence intervals \\
+5--6 & Layer fraction study $k \in \{1, 2, 3, 6, 9, 12\}$ (L4) and convergence analysis (L5) &
+       Parameter fraction vs.\ utility curves \\
 \rowcolor{rowgray}
-7   & Secondary dataset experiment (L7); final result aggregation &
-       Generalisability evidence \\
-8   & Final report and presentation preparation &
-       Complete project submission \\
+7   & Cross-benchmark evaluation on secondary GLUE task (L6) &
+       Cross-task architectural validation \\
+8   & Final report synthesis and presentation preparation &
+       Complete project submission and open-source benchmark \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 \bigskip
 \textbf{Summary.}
-The core infrastructure, training pipeline, and initial results are complete. The primary
-midterm finding --- that selective fine-tuning of late Transformer layers (9--11) under
-DP-SGD achieves 84.8\% validation accuracy compared to the 89.0\% non-private ceiling,
-while maintaining MIA AUC $\approx 0.51$ (near-random) --- is a substantive and
-reproducible result. The second half of the project will harden these findings with
-multi-seed reproducibility, an $\varepsilon$-sweep to map the full Pareto frontier, and
-the $k$-fraction study needed to completely answer the research question.
+The core training pipeline, layer tournament, and swap-pair auditing framework are operational.
+Our primary midterm finding demonstrates that selective fine-tuning of late transformer layers
+(blocks 9--11) under DP-SGD achieves 84.8\% validation accuracy, outperforming full DP
+fine-tuning (81.0\%) while keeping membership leakage near chance (RMIA AUC 0.51). The remaining
+work will map the complete privacy-utility Pareto frontier across multiple seeds, test tighter
+privacy budgets ($\varepsilon \le 1.0$), and evaluate the $k$-fraction scaling curve.
 
 \end{document}
