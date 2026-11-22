@@ -5,8 +5,14 @@ import os
 import sys
 from typing import Dict, List
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from grid_spec import CONFIGS, GATE_CONFIGS, exp_name  # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
+from grid_spec import CONFIGS, GATE_CONFIGS, SEEDS, CLEAN_BASE, DP_BASE, exp_name  # noqa: E402
+from src.record_validation import evaluate_pairs  # noqa: E402
+
+MANIFESTS_DIR = os.path.join(ROOT, "manifests")
 
 # Pre-registered rule (fixed before any corrected run):
 # a model "stays near the majority-class baseline" (collapsed) if its SST-2 validation accuracy
@@ -46,28 +52,41 @@ def index_records(recs: List[dict]) -> Dict[tuple, dict]:
     return out
 
 
-def pair_status(idx: Dict[tuple, dict], name: str, seed: int) -> str:
-    """'ok' if both swap-pair models have status ok; 'failed'/'privacy_check_failed'/'missing' otherwise."""
-    st = []
-    for role in ("M_A", "M_B"):
-        r = idx.get((name, seed, role))
-        st.append("missing" if r is None else r.get("status", "missing"))
-    if all(s == "ok" for s in st):
-        return "ok"
-    for s in ("privacy_check_failed", "failed", "missing"):
-        if s in st:
-            return s
-    return st[0]
+def expected_steps(warmup: str) -> Dict[str, int]:
+    """Grid spec step counts per experiment name: DP 300, clean 1000."""
+    return {exp_name(c, warmup): (CLEAN_BASE if CONFIGS[c][1] is None else DP_BASE)["max_steps"] for c in CONFIGS}
+
+
+def grid_pair_states(idx: Dict[tuple, dict], warmup: str, seeds=SEEDS, configs=None,
+                     manifests_dir: str = MANIFESTS_DIR) -> Dict[tuple, dict]:
+    """Acceptance for every grid swap pair of one warmup variant: {(config_name, seed): state}.
+
+    Same rule as run_experiment.py and aggregate_grid.py (src/record_validation.py), plus the grid
+    step counts and the same-seed cross-configuration partition-hash check."""
+    configs = list(CONFIGS) if configs is None else list(configs)
+    # the cross-configuration check always looks at every config of the seed, not just the subset asked for
+    wanted = [(exp_name(c, warmup), s) for c in CONFIGS for s in seeds]
+    res = evaluate_pairs(idx, wanted, expected_steps(warmup), manifests_dir)
+    return {(c, s): res[(exp_name(c, warmup), s)] for c in configs for s in seeds}
+
+
+def pair_status(idx: Dict[tuple, dict], name: str, seed: int, expected_max_steps: int = None,
+                manifests_dir: str = MANIFESTS_DIR) -> str:
+    """Status of one pair under the shared rule (used for smoke records and ad-hoc checks)."""
+    res = evaluate_pairs(idx, [(name, seed)], {name: expected_max_steps} if expected_max_steps else None,
+                         manifests_dir)
+    return res[(name, seed)]["status"]
 
 
 def gate_decision(records_dir: str, warmup: str = "none", seed: int = 42) -> dict:
     """Step-1 decision: do early-3, late-3 and all-12 at eps=5 learn without warmup (seed 42)?"""
     idx = index_records(load_records(records_dir))
+    states = grid_pair_states(idx, warmup, seeds=[seed])
     rows, all_present, any_collapsed = [], True, False
     for c in GATE_CONFIGS:
         name = exp_name(c, warmup)
-        st = pair_status(idx, name, seed)
-        entry = {"config": c, "exp_name": name, "status": st}
+        st = states[(c, seed)]["status"]
+        entry = {"config": c, "exp_name": name, "status": st, "reasons": states[(c, seed)]["reasons"]}
         if st == "ok":
             ms = [idx[(name, seed, r)] for r in ("M_A", "M_B")]
             entry["val_accuracy"] = [m["metrics"]["val_accuracy"] for m in ms]

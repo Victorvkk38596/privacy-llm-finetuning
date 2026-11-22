@@ -450,6 +450,14 @@ hash and manifest, trainable layers and per-group parameter counts, training set
 $\varepsilon$, $\delta$, the accounting ledger, validation accuracy, predicted-positive rate, RMIA ROC-AUC and
 TPR at 1\% FPR. Failed runs get a record with status \texttt{failed} and stay in the tables.
 
+\textbf{Acceptance rule.} One rule (\texttt{src/record\_validation.py}) is applied when a record is written,
+when the runner decides what to resume, and when the analysis selects pairs. A swap pair is valid only if
+both models completed the configured steps (300 for DP, 1{,}000 for clean), have finite metrics and a
+nonempty partition hash, the two hashes match each other and the seed's reference (its manifest, or else the
+hash shared by most valid pairs of that seed), and, for DP, the accounted $\varepsilon$ is finite and at most
+the target and both accounting checks passed. Invalid, failed, incomplete and pending pairs are listed with
+their reasons, rerun on resume (older records are archived, not deleted) and excluded from all statistics.
+
 \subsection{Analysis procedure}
 
 For each (configuration, seed) the two swap-pair models are averaged. Configurations are summarised by
@@ -461,7 +469,9 @@ $2.5\times$ the SD of the differences, and it reflects seed-to-seed variation (p
 noise and data order together), not uncertainty about the population of all possible runs. We call an
 accuracy difference \emph{repeated} only if it has the same sign in all three matched seeds, and make no
 significance claims. RMIA AUC near 0.5 is reported as the result of this offline RMIA attack with one
-reference model, not as evidence about the formal guarantee.
+reference model, not as evidence about the formal guarantee. An accuracy-versus-RMIA-AUC plot shows
+only configurations with three valid seeds and no collapsed model; excluded configurations and the reason
+are listed under it and in \texttt{pareto\_status.csv}.
 
 \subsection{Results}
 
@@ -489,6 +499,13 @@ the runs exist.}}}
 \includegraphics[width=\textwidth]{results/grid/analysis/fig_count.pdf}
 \caption{Location, budget and count comparisons. Each point is one seed (mean of its swap pair); lines join matched seeds; black bars show mean $\pm$ SD over seeds. Dashed lines: majority-class accuracy, chance AUC (0.5) and chance TPR at 1\% FPR (0.01).}
 \label{fig:grid}
+\end{figure}}{}
+
+\IfFileExists{results/grid/analysis/fig_pareto.pdf}{%
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.75\textwidth]{results/grid/analysis/fig_pareto.pdf}
+\caption{Validation accuracy versus RMIA ROC-AUC (mean $\pm$ SD over three seeds) for configurations with three valid seeds and no collapsed model. The line joins configurations not dominated by another (higher accuracy and lower AUC). Hollow marker: non-DP clean baseline.}
+\label{fig:pareto}
 \end{figure}}{}
 
 \subsection{Claims supported at this point}

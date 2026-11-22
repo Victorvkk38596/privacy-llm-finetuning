@@ -73,8 +73,10 @@ python scripts/aggregate_grid.py --records results/grid/records --out results/gr
 pdflatex report.tex && pdflatex report.tex
 ```
 
-`report.tex` picks up `results/grid/analysis/table_core.tex` and `fig_{location,budget,count}.pdf`
-automatically. After the runs, write the interpretation paragraphs in the Results section by hand
+`report.tex` picks up `results/grid/analysis/table_core.tex` and `fig_{location,budget,count,pareto}.pdf`
+automatically. `seed_level.csv` lists every (config, seed) with its status (`ok`, `pending`, `incomplete`,
+`failed`, `invalid`, `partition_mismatch`) and the reasons; `pareto_status.csv` says why a configuration
+is left out of the Pareto plot. After the runs, write the interpretation paragraphs in the Results section by hand
 (only call an accuracy difference "repeated" if it has the same sign in all three matched seeds; see
 `matched_diffs.csv`).
 
@@ -111,10 +113,21 @@ No measured runtime exists yet (the pilot logs did not record wall time). After 
 per-pair wall times of completed configurations, and lists configurations with no measured run
 separately instead of guessing.
 
+## Acceptance rule (runner, analysis and record writing use the same code)
+
+`src/record_validation.py`: a swap pair counts only if both models finished the configured steps (DP 300,
+clean 1000), have finite metrics and a nonempty partition hash, both hashes match each other and the seed's
+reference (manifest, else the majority of valid pairs), and, for DP, accounted ε is finite and ≤ target and
+both accounting checks passed. Anything else is rerun on resume; its old records move to
+`results/grid/records/superseded/<time>/` so the failure stays on disk but out of the statistics.
+
 ## Checks run for this update (no GPU)
 
 - `tests/test_privacy_guard.py`: 9 tests on the private-data ledger (ordering, blocking, Opacus
   shape-probe window, step-count matching). Pass.
+- `tests/test_record_validation.py`, `tests/test_worker_failure.py`, `tests/test_grid_wiring.py`:
+  acceptance rule (incl. the regression where a pair with mismatched hashes and ε = 6 > 5 was labelled ok),
+  worker exiting without a result, missing-record failures and retries, stage coverage. Pass.
 - `tests/test_aggregate_grid.py`: swap-pair averaging, mean/SD, matched-seed differences, failed and
   pending visibility, collapse flag, partition-hash mismatch rejection, figure and table output, on
   synthetic records. Pass.

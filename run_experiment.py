@@ -36,9 +36,10 @@ if str(project_root) not in sys.path:
 import numpy as np
 import yaml
 
-from src.data import get_partitions, export_manifest, partition_hash
-from src.audit import evaluate_attacks, load_logits
-from src.train import train_single_model
+from src.record_validation import model_status, validate_model
+from src.worker_utils import wait_for_result
+# Heavy modules (torch / datasets) are imported lazily inside the functions that need them,
+# so the record and worker-handling logic can be tested without them.
 
 RECORD_SCHEMA = "grid-record-v1"
 
@@ -72,6 +73,7 @@ CSV_COLUMNS = [
 def _worker_process(role: str, train_split: str, config: dict, seed: int, output_dir: str, queue: multiprocessing.Queue):
     """Isolated subprocess worker executing single-model training and logit extraction."""
     try:
+        from src.train import train_single_model
         telemetry = train_single_model(
             role=role,
             train_split_name=train_split,
@@ -270,6 +272,19 @@ def build_record(role: str, config: dict, seed: int, telemetry: dict, attack_met
     }
 
 
+def finalize_record_status(rec: dict) -> dict:
+    """Sets status from the shared acceptance rule (src/record_validation.py): 'ok' or 'invalid'
+    (accounted epsilon missing / non-finite / above target, failed accounting checks, missing
+    partition hash, non-finite metrics, incomplete steps). Pair-level checks happen at load time."""
+    rec["status"] = model_status(rec)
+    reasons = validate_model(rec)
+    if reasons:
+        rec["invalid_reasons"] = reasons
+    else:
+        rec.pop("invalid_reasons", None)
+    return rec
+
+
 def write_record(records_dir: str, rec: dict, role: str) -> str:
     os.makedirs(records_dir, exist_ok=True)
     path = record_path(records_dir, rec["exp_name"], rec["seed"], role)
@@ -297,6 +312,7 @@ def write_failure_records(records_dir: str, config: dict, seed: int, error: str,
 
 def ensure_manifest(seed: int, out_dir: str = "manifests") -> str:
     """Exports manifests/manifest_seed{seed}.json if missing; never overwrites an existing one."""
+    from src.data import get_partitions, export_manifest, partition_hash
     path = os.path.join(project_root, out_dir, f"manifest_seed{seed}.json")
     part = get_partitions(seed=seed)
     core = {k: part[k] for k in ("A", "B", "out", "pop", "tune")}
@@ -340,7 +356,8 @@ def _run_orchestrator(config: dict, seed: int, output_dir: str, summary_csv: str
     t0_A = time.time()
     p_A.start()
     print(f"  Subprocess M_A active with PID: {p_A.pid}")
-    status_A = q_A.get()
+    # Never block forever: a worker killed before queuing a result surfaces as WorkerFailure.
+    status_A = wait_for_result(p_A, q_A, role="M_A", timeout_sec=config.get("worker_timeout_sec"))
     p_A.join()
     elapsed_A = time.time() - t0_A
     if status_A[0] != "SUCCESS":
@@ -357,7 +374,8 @@ def _run_orchestrator(config: dict, seed: int, output_dir: str, summary_csv: str
     t0_B = time.time()
     p_B.start()
     print(f"  Subprocess M_B active with PID: {p_B.pid}")
-    status_B = q_B.get()
+    # Never block forever: a worker killed before queuing a result surfaces as WorkerFailure.
+    status_B = wait_for_result(p_B, q_B, role="M_B", timeout_sec=config.get("worker_timeout_sec"))
     p_B.join()
     elapsed_B = time.time() - t0_B
     if status_B[0] != "SUCCESS":
@@ -369,6 +387,8 @@ def _run_orchestrator(config: dict, seed: int, output_dir: str, summary_csv: str
 
     # 3. CPU Post-Processing & Bidirectional Cross-Audit
     print(f"\n[3/3] CPU Post-Processing & Bidirectional Cross-Audit...")
+    from src.data import get_partitions
+    from src.audit import evaluate_attacks, load_logits
     partitions = get_partitions(seed=seed)
     member_labels_A = np.array([it["label"] for it in partitions["D_A"]], dtype=np.int64)
     member_labels_B = np.array([it["label"] for it in partitions["D_B"]], dtype=np.int64)
@@ -448,10 +468,10 @@ def _run_orchestrator(config: dict, seed: int, output_dir: str, summary_csv: str
     wall = time.time() - t_wall
     for role, res, met in (("M_A", res_A, metrics_A), ("M_B", res_B, metrics_B)):
         rec = build_record(role, config, seed, res, met, manifest_path, wall, env)
-        led = (rec["privacy"].get("accounting_ledger") or {})
-        if config.get("use_dp") and not (led.get("ordering_ok") and led.get("steps_match_ok")):
-            rec["status"] = "privacy_check_failed"
+        finalize_record_status(rec)
         print(f"[✓] Record written: {write_record(records_dir, rec, role)} (status={rec['status']})")
+        for reason in rec.get("invalid_reasons", []):
+            print(f"    [!] {role} invalid: {reason}")
 
     return {
         "exp_name": exp_name,

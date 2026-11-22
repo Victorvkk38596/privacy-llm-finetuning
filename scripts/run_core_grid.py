@@ -19,8 +19,10 @@ Examples:
   python scripts/run_core_grid.py --stage grid --warmup <chosen> --plan   # list pending runs, no training
 """
 import argparse
+import glob
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,9 +30,14 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
 
 from grid_spec import CONFIGS, SEEDS, GATE_CONFIGS, NEW_SETTING_CONFIGS, build_config, exp_name  # noqa: E402
-from grid_records import load_records, index_records, pair_status, gate_decision  # noqa: E402
+from grid_records import (load_records, index_records, pair_status, gate_decision,  # noqa: E402
+                          grid_pair_states)
+from src.record_validation import validate_model  # noqa: E402
+
+SMOKE_STEPS = 3
 
 RESULTS = os.path.join(ROOT, "results", "grid")
 RECORDS = os.path.join(RESULTS, "records")
@@ -61,8 +68,39 @@ def command_for(config_name: str, warmup: str, seed: int, records_dir: str = REC
             "--summary_csv", _rel(os.path.join(os.path.dirname(records_dir), "summary_rows.csv")), *extra]
 
 
+def pair_state(records_dir: str, config_name: str, warmup: str, seed: int) -> dict:
+    """Shared acceptance rule (src/record_validation.py). Grid records also get the grid step
+    counts and the same-seed cross-configuration hash check; smoke records expect 3 steps."""
+    idx = index_records(load_records(records_dir))
+    if os.path.abspath(records_dir) == os.path.abspath(RECORDS):
+        return grid_pair_states(idx, warmup, seeds=[seed], configs=[config_name])[(config_name, seed)]
+    name = exp_name(config_name, warmup)
+    return {"status": pair_status(idx, name, seed, expected_max_steps=SMOKE_STEPS), "reasons": []}
+
+
+def archive_pair_records(records_dir: str, name: str, seed: int) -> list:
+    """Move a not-ok pair's old records to records/superseded/<utc>/ before retrying, so earlier
+    failures stay on disk (and out of the statistics) instead of being silently overwritten."""
+    old = [p for p in glob.glob(os.path.join(records_dir, f"{name}__seed{seed}__M_*.json"))]
+    if not old:
+        return []
+    dest = os.path.join(records_dir, "superseded", time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
+    os.makedirs(dest, exist_ok=True)
+    moved = []
+    for p in old:
+        target = os.path.join(dest, os.path.basename(p))
+        shutil.move(p, target)
+        moved.append(target)
+    return moved
+
+
 def run_pair(config_name: str, warmup: str, seed: int, records_dir: str = RECORDS, extra=()) -> str:
     name = exp_name(config_name, warmup)
+    prev = pair_state(records_dir, config_name, warmup, seed)
+    if prev["status"] not in ("ok", "pending"):
+        moved = archive_pair_records(records_dir, name, seed)
+        print(f"[retry] {name} seed {seed} was '{prev['status']}' ({'; '.join(prev['reasons'][:3])}); "
+              f"archived {len(moved)} old record(s)", flush=True)
     cmd = command_for(config_name, warmup, seed, records_dir=records_dir,
                       logits_dir=os.path.join(os.path.dirname(records_dir), "logits"), extra=extra)
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -72,17 +110,29 @@ def run_pair(config_name: str, warmup: str, seed: int, records_dir: str = RECORD
     with open(log_path, "w", encoding="utf-8") as log:
         proc = subprocess.run([sys.executable] + cmd[1:], cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
     dt = time.time() - t0
-    st = pair_status(index_records(load_records(records_dir)), name, seed)
-    if proc.returncode != 0 and st == "missing":
-        # hard crash (e.g. OOM-kill) before run_experiment could write a failure record
-        sys.path.insert(0, ROOT)
-        from run_experiment import write_failure_records
-        tail = open(log_path, encoding="utf-8", errors="replace").read()[-4000:]
+    write_missing_failure_records(records_dir, config_name, warmup, seed, proc.returncode, log_path)
+    state = pair_state(records_dir, config_name, warmup, seed)
+    print(f"--> {name} seed {seed}: exit={proc.returncode} status={state['status']} ({dt/60:.1f} min)", flush=True)
+    for r in state["reasons"][:6]:
+        print(f"      {r}", flush=True)
+    return state["status"]
+
+
+def write_missing_failure_records(records_dir: str, config_name: str, warmup: str, seed: int,
+                                  returncode: int, log_path: str = None) -> list:
+    """Any model without a record after the subprocess finished (hard crash, OOM-kill, or a clean
+    exit that never wrote one) gets a failure record, whatever the exit code."""
+    from run_experiment import write_failure_records
+    name = exp_name(config_name, warmup)
+    idx = index_records(load_records(records_dir))
+    missing = [r for r in ("M_A", "M_B") if (name, seed, r) not in idx]
+    if missing:
+        tail = ""
+        if log_path and os.path.exists(log_path):
+            tail = open(log_path, encoding="utf-8", errors="replace").read()[-4000:]
         write_failure_records(records_dir, build_config(config_name, warmup), seed,
-                              f"exit code {proc.returncode}\n{tail}")
-        st = "failed"
-    print(f"--> {name} seed {seed}: exit={proc.returncode} status={st} ({dt/60:.1f} min)", flush=True)
-    return st
+                              f"no record written (exit code {returncode})\n{tail}", roles=tuple(missing))
+    return missing
 
 
 def planned(stage: str):
@@ -99,8 +149,10 @@ def stage_smoke() -> int:
     """Accounting-order smoke test on the real pipeline (3 DP steps)."""
     smoke_dir = os.path.join(RESULTS, "smoke", "records")
     failures = []
-    st = run_pair("dp_late3_e5", "none", 42, records_dir=smoke_dir, extra=["--max_steps", "3"])
+    st = run_pair("dp_late3_e5", "none", 42, records_dir=smoke_dir, extra=["--max_steps", str(SMOKE_STEPS)])
     idx = index_records(load_records(smoke_dir))
+    if st != "ok":
+        failures.append(f"swap pair status '{st}' under the shared acceptance rule (incl. matching partition hash)")
     for role in ("M_A", "M_B"):
         r = idx.get((exp_name("dp_late3_e5", "none"), 42, role))
         if r is None or r.get("status") != "ok":
@@ -116,7 +168,8 @@ def stage_smoke() -> int:
             "accountant steps == logical optimizer steps == 3":
                 led["accountant_total_steps"] == led["logical_steps"] == 3,
             "no public warmup in this run": led["public_warmup"] is None,
-            "accounted epsilon <= target": r["privacy"]["accounted_epsilon"] <= r["privacy"]["target_epsilon"] + 1e-6,
+            "record passes the shared acceptance rule (accounted eps finite and <= target, hash, metrics)":
+                not validate_model(r, expected_max_steps=SMOKE_STEPS),
         }
         for k, ok in checks.items():
             print(f"  [{'PASS' if ok else 'FAIL'}] {role}: {k}")
@@ -165,13 +218,15 @@ def main():
     if args.configs:
         todo = [(c, s) for c, s in todo if c in args.configs]
     idx = index_records(load_records(RECORDS))
-    pending = [(c, s) for c, s in todo if pair_status(idx, exp_name(c, args.warmup), s) != "ok"]
+    states = grid_pair_states(idx, args.warmup)
+    pending = [(c, s) for c, s in todo if states[(c, s)]["status"] != "ok"]
     print(f"Stage {args.stage} (warmup={args.warmup}): {len(todo)} swap pairs, {len(todo) - len(pending)} done, "
           f"{len(pending)} pending")
     if args.plan:
         for c, s in pending:
-            print(f"  {exp_name(c, args.warmup):28s} seed {s}: "
-                  f"{pair_status(idx, exp_name(c, args.warmup), s)}")
+            st = states[(c, s)]
+            print(f"  {exp_name(c, args.warmup):28s} seed {s}: {st['status']}"
+                  + (f"  ({'; '.join(st['reasons'][:3])})" if st["reasons"] else ""))
             print("    " + " ".join(command_for(c, args.warmup, s)))
         return 0
 

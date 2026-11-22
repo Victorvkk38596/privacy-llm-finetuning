@@ -22,9 +22,12 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
 from grid_spec import CONFIGS, COMPARISONS, SEEDS, SST2_VAL_MAJORITY_ACC, TOTAL_PARAMS, expected_trainable, exp_name  # noqa: E402
-from grid_records import load_records, model_collapsed  # noqa: E402
+from grid_records import load_records, model_collapsed, index_records, grid_pair_states, MANIFESTS_DIR  # noqa: E402
+from src.record_validation import validate_model  # noqa: E402
 
 METRICS = [("val_accuracy", "Validation accuracy (%)"), ("rmia_auc", "RMIA ROC-AUC"),
            ("rmia_tpr_at_1fpr", "RMIA TPR at 1% FPR")]
@@ -55,7 +58,8 @@ def model_table(recs):
             "accounted_epsilon": p.get("accounted_epsilon"), "noise_multiplier": p.get("noise_multiplier"),
             "accounting_order_ok": led.get("ordering_ok"), "accountant_steps_match": led.get("steps_match_ok"),
             "val_accuracy": m.get("val_accuracy"), "val_pred_pos_rate": m.get("val_pred_pos_rate"),
-            "collapsed": model_collapsed(r) if r.get("status") == "ok" else None,
+            "collapsed": model_collapsed(r) if (r.get("metrics") or {}).get("val_accuracy") is not None else None,
+            "invalid_reasons": "; ".join(validate_model(r)),
             "rmia_auc": m.get("rmia_auc"), "rmia_tpr_at_1fpr": m.get("rmia_tpr_at_1fpr"),
             "loss_auc": m.get("loss_auc"), "clip_fraction": r.get("clip_fraction"),
             "final_train_loss": r.get("final_train_loss"), "train_time_sec": r.get("train_time_sec"),
@@ -68,32 +72,50 @@ def wanted_names(warmup):
     return {exp_name(c, warmup): c for c in CONFIGS}
 
 
-def seed_table(models, warmup):
-    names = wanted_names(warmup)
+def _n_superseded(records_dir, name, seed):
+    import glob
+    if not records_dir:
+        return 0
+    return len(glob.glob(os.path.join(records_dir, "superseded", "*", f"{name}__seed{seed}__M_*.json")))
+
+
+def seed_table(recs, warmup, manifests_dir=MANIFESTS_DIR, records_dir=None):
+    """One row per (config, seed). Acceptance uses the shared rule (src/record_validation.py, via
+    grid_pair_states): both models valid, matching nonempty partition hash equal to the seed's
+    reference, DP accounting checks passed, accounted eps finite and <= target, grid step counts.
+    Only 'ok' pairs carry metrics; every other status stays listed with its reasons."""
+    idx = index_records(recs)
+    states = grid_pair_states(idx, warmup, manifests_dir=manifests_dir)
     rows = []
-    for name, cfg in names.items():
+    for cfg in CONFIGS:
+        name = exp_name(cfg, warmup)
         for s in SEEDS:
-            sub = models[(models.exp_name == name) & (models.seed == s)]
-            roles = {r.role: r for r in sub.itertuples()}
-            if len(sub) == 0:
-                status = "pending"
-            elif all(roles.get(x) is not None and roles[x].status == "ok" for x in ("M_A", "M_B")):
-                status = "ok"
-            else:
-                status = next((st for st in ("privacy_check_failed", "failed") if st in set(sub.status)), "incomplete")
-            row = {"config_name": cfg, "exp_name": name, "seed": s, "status": status,
-                   "partition_hash": sub.partition_hash.dropna().iloc[0] if sub.partition_hash.notna().any() else None}
-            if status == "ok":
-                ok = sub[sub.status == "ok"]
-                for k, _ in METRICS + [("accounted_epsilon", ""), ("val_pred_pos_rate", "")]:
-                    vals = ok[k].astype(float)
-                    row[k] = float(vals.mean()) if vals.notna().all() else None
-                    for x in ("M_A", "M_B"):
-                        row[f"{k}_{x}"] = roles[x]._asdict()[k]
-                row["n_collapsed_models"] = int(ok.collapsed.sum())
-                row["pair_wall_time_sec"] = float(ok.wall_time_sec.max()) if ok.wall_time_sec.notna().any() else None
+            st = states[(cfg, s)]
+            row = {"config_name": cfg, "exp_name": name, "seed": s, "status": st["status"],
+                   "reasons": "; ".join(st["reasons"]), "partition_hash": st["hash"],
+                   "reference_hash": st["reference_hash"], "reference_source": st["reference_source"],
+                   "n_superseded_records": _n_superseded(records_dir, name, s)}
+            if st["status"] == "ok":
+                pair = {x: idx[(name, s, x)] for x in ("M_A", "M_B")}
+                for k in ("val_accuracy", "rmia_auc", "rmia_tpr_at_1fpr", "val_pred_pos_rate"):
+                    vals = [(pair[x].get("metrics") or {}).get(k) for x in ("M_A", "M_B")]
+                    for x, v in zip(("M_A", "M_B"), vals):
+                        row[f"{k}_{x}"] = v
+                    # swap-pair average within the seed (the unit for across-seed statistics)
+                    row[k] = float(np.mean(vals)) if all(v is not None for v in vals) else None
+                eps = [(pair[x].get("privacy") or {}).get("accounted_epsilon") for x in ("M_A", "M_B")]
+                row["accounted_epsilon"] = float(np.mean(eps)) if all(e is not None for e in eps) else None
+                row["n_collapsed_models"] = int(sum(model_collapsed(pair[x]) for x in ("M_A", "M_B")))
+                walls = [pair[x].get("wall_time_sec") for x in ("M_A", "M_B") if pair[x].get("wall_time_sec") is not None]
+                row["pair_wall_time_sec"] = float(max(walls)) if walls else None
             rows.append(row)
-    return pd.DataFrame(rows)
+    cols = ["val_accuracy", "rmia_auc", "rmia_tpr_at_1fpr", "val_pred_pos_rate", "accounted_epsilon",
+            "n_collapsed_models", "pair_wall_time_sec"]
+    df = pd.DataFrame(rows)
+    for c in cols:  # present even when no pair is ok yet
+        if c not in df.columns:
+            df[c] = np.nan
+    return df
 
 
 def _ci(vals):
@@ -136,7 +158,9 @@ def matched_diffs(seeds):
                 continue
             a = seeds[(seeds.config_name == arm) & (seeds.status == "ok")].set_index("seed")
             b = seeds[(seeds.config_name == ref) & (seeds.status == "ok")].set_index("seed")
-            common = sorted(set(a.index) & set(b.index))
+            # matched seeds: both arms valid and on the same partition
+            common = sorted(s for s in set(a.index) & set(b.index)
+                            if a.loc[s, "partition_hash"] == b.loc[s, "partition_hash"])
             row = {"comparison": comp, "arm": arm, "reference": ref, "matched_seeds": ",".join(map(str, common)),
                    "n_matched": len(common)}
             for k, _ in METRICS:
@@ -271,6 +295,85 @@ def figures(seeds, out_dir, warmup):
     return paths
 
 
+# ----------------------------------------------------------------------------- Pareto
+def pareto_table(summary):
+    """Eligibility for the accuracy-vs-RMIA-AUC plot: all three seeds valid and no collapsed model.
+    Frontier: no other eligible config has accuracy >= and AUC <= with at least one strict."""
+    rows = []
+    for r in summary.itertuples():
+        reasons = []
+        if r.n_seeds_ok < len(SEEDS):
+            reasons.append(f"{r.n_seeds_ok}/{len(SEEDS)} seeds valid" + (f" ({r.seeds_not_ok})" if r.seeds_not_ok else ""))
+        if r.n_collapsed_models:
+            reasons.append(f"{r.n_collapsed_models} collapsed model(s)")
+        rows.append({"config_name": r.config_name, "label": r.label, "eligible": not reasons,
+                     "excluded_because": "; ".join(reasons),
+                     "val_accuracy_mean": r.val_accuracy_mean, "val_accuracy_sd": r.val_accuracy_sd,
+                     "rmia_auc_mean": r.rmia_auc_mean, "rmia_auc_sd": r.rmia_auc_sd,
+                     "is_dp": r.target_epsilon is not None and not (isinstance(r.target_epsilon, float) and math.isnan(r.target_epsilon))})
+    df = pd.DataFrame(rows)
+    el = df[df.eligible]
+    front = []
+    for r in el.itertuples():
+        dominated = any((o.val_accuracy_mean >= r.val_accuracy_mean and o.rmia_auc_mean <= r.rmia_auc_mean and
+                         (o.val_accuracy_mean > r.val_accuracy_mean or o.rmia_auc_mean < r.rmia_auc_mean))
+                        for o in el.itertuples() if o.config_name != r.config_name)
+        front.append(not dominated)
+    df["on_frontier"] = False
+    df.loc[el.index, "on_frontier"] = front
+    return df
+
+
+def pareto_figure(ptab, out_dir, warmup):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    el = ptab[ptab.eligible]
+    fig, ax = plt.subplots(figsize=(5.6, 3.6), constrained_layout=True)
+    ax.grid(color=GRID, linewidth=0.6)
+    ax.set_axisbelow(True)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.axvline(0.5, color=MUTED, linewidth=1, linestyle=(0, (3, 2)))
+    ax.axhline(SST2_VAL_MAJORITY_ACC, color=MUTED, linewidth=1, linestyle=(0, (3, 2)))
+    ax.text(0.5, 0.99, " chance AUC", transform=ax.get_xaxis_transform(), fontsize=7, color=MUTED, va="top")
+    ax.text(0.99, SST2_VAL_MAJORITY_ACC, "majority class", transform=ax.get_yaxis_transform(), fontsize=7,
+            color=MUTED, ha="right", va="bottom")
+    if len(el):
+        fr = el[el.on_frontier].sort_values("rmia_auc_mean")
+        ax.plot(fr.rmia_auc_mean, fr.val_accuracy_mean, color=INK2, linewidth=1, zorder=2,
+                drawstyle="steps-post", label="frontier (higher acc., lower AUC)")
+        for r in el.itertuples():
+            dp = bool(r.is_dp)
+            ax.errorbar(r.rmia_auc_mean, r.val_accuracy_mean, xerr=r.rmia_auc_sd or 0, yerr=r.val_accuracy_sd or 0,
+                        fmt="o", markersize=7, color=SEED_STYLE[42][0] if dp else INK2,
+                        mfc=SEED_STYLE[42][0] if dp else SURFACE, mec=SEED_STYLE[42][0] if dp else INK2,
+                        elinewidth=1, capsize=0, zorder=3)
+            ax.annotate(r.label + ("" if dp else " (non-DP)"), (r.rmia_auc_mean, r.val_accuracy_mean),
+                        xytext=(5, 4), textcoords="offset points", fontsize=7, color=INK)
+        ax.legend(loc="best", frameon=False, fontsize=7)
+        lo = min(0.49, float((el.rmia_auc_mean - el.rmia_auc_sd.fillna(0)).min()) - 0.005)
+        hi = max(0.51, float((el.rmia_auc_mean + el.rmia_auc_sd.fillna(0)).max()) + 0.02)
+        ax.set_xlim(lo, hi)
+    else:
+        ax.text(0.5, 0.5, "no configuration has three valid,\nnon-collapsed seeds yet", transform=ax.transAxes,
+                ha="center", va="center", fontsize=8, color=INK2)
+    ax.set_xlabel("RMIA ROC-AUC (mean ± SD over 3 seeds; lower = less measured leakage)")
+    ax.set_ylabel("Validation accuracy (%)")
+    ax.set_title("Accuracy vs. empirical membership leakage", loc="left", fontsize=9, color=INK)
+    excl = ptab[~ptab.eligible]
+    note = "Excluded: " + "; ".join(f"{r.label} ({r.excluded_because})" for r in excl.itertuples()) if len(excl) else "Excluded: none"
+    import textwrap
+    fig.text(0.01, -0.01, textwrap.fill(note + f". DP head warmup: {warmup}.", 120), fontsize=6.3, color=INK2, va="top")
+    paths = []
+    for ext in ("pdf", "png"):
+        p = os.path.join(out_dir, f"fig_pareto.{ext}")
+        fig.savefig(p, dpi=200, bbox_inches="tight")
+        paths.append(p)
+    plt.close(fig)
+    return paths
+
+
 # ----------------------------------------------------------------------------- runtime estimate
 def runtime_estimate(seeds, warmup):
     lines = ["Runtime estimate from MEASURED completed swap pairs only (wall time per pair, this hardware):"]
@@ -301,17 +404,20 @@ def main():
     ap.add_argument("--warmup", default="none", choices=["none", "public_imdb"])
     ap.add_argument("--estimate", action="store_true")
     ap.add_argument("--no_figures", action="store_true")
+    ap.add_argument("--manifests", default=MANIFESTS_DIR,
+                    help="manifest dir: a seed's manifest hash is the reference for its partition check")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     recs = load_records(args.records) if os.path.isdir(args.records) else []
     models = model_table(recs) if recs else pd.DataFrame(columns=["exp_name", "seed", "role", "status", "partition_hash"])
-    seeds = seed_table(models, args.warmup)
-    # matched partitions: every ok seed must share one partition hash across configs
+    seeds = seed_table(recs, args.warmup, manifests_dir=args.manifests, records_dir=args.records)
+    # Partition consistency is enforced per pair (status 'partition_mismatch'); a valid seed has one hash.
     for s in SEEDS:
         hs = set(seeds[(seeds.seed == s) & (seeds.status == "ok")].partition_hash.dropna())
-        if len(hs) > 1:
-            raise SystemExit(f"Seed {s} has {len(hs)} different partition hashes across configs: {hs}")
+        assert len(hs) <= 1, f"internal error: seed {s} has several hashes among valid pairs: {hs}"
     summary = summary_table(seeds)
+    ptab = pareto_table(summary)
+    ptab.to_csv(os.path.join(args.out, "pareto_status.csv"), index=False)
     diffs = matched_diffs(seeds)
     models.to_csv(os.path.join(args.out, "models.csv"), index=False)
     seeds.to_csv(os.path.join(args.out, "seed_level.csv"), index=False)
@@ -321,6 +427,7 @@ def main():
         f.write(latex_table(summary, seeds, args.warmup))
     if not args.no_figures:
         figures(seeds, args.out, args.warmup)
+        pareto_figure(ptab, args.out, args.warmup)
     if args.estimate:
         est = runtime_estimate(seeds, args.warmup)
         with open(os.path.join(args.out, "runtime_estimate.txt"), "w") as f:
@@ -328,6 +435,9 @@ def main():
         print(est)
     n_ok = int((seeds.status == "ok").sum())
     print(f"{len(recs)} records -> {n_ok}/{len(seeds)} swap pairs ok. Outputs in {args.out}")
+    for r in seeds[seeds.status != "ok"].itertuples():
+        if r.status != "pending":
+            print(f"  {r.exp_name} seed {r.seed}: {r.status} {('- ' + r.reasons) if r.reasons else ''}")
 
 
 if __name__ == "__main__":
