@@ -1,0 +1,111 @@
+W1122 18:55:42.269296 66857 .venv/lib/python3.9/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+
+======================================================================
+MASTER SUBPROCESS ORCHESTRATOR: step1_nowarm_late3 (Seed 42)
+Layers: 9,10,11 | DP: True | Max Steps: 300
+======================================================================
+
+[1/3] Spawning Subprocess for Target Model M_A (train on D_A)...
+W1122 18:55:46.036025 66904 .venv/lib/python3.9/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Some weights of RobertaForSequenceClassification were not initialized from the model checkpoint at roberta-base and are newly initialized: ['classifier.dense.bias', 'classifier.dense.weight', 'classifier.out_proj.bias', 'classifier.out_proj.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+/Users/pranav/Documents/privacy-llm-finetuning/.venv/lib/python3.9/site-packages/opacus/accountants/analysis/rdp.py:332: UserWarning: Optimal order is the largest alpha. Please consider expanding the range of alphas to get a tighter privacy bound.
+  warnings.warn(
+/Users/pranav/Documents/privacy-llm-finetuning/.venv/lib/python3.9/site-packages/opacus/privacy_engine.py:98: UserWarning: Secure RNG turned off. This is perfectly fine for experimentation as it allows for much faster training performance, but remember to turn it on and retrain one last time before production with ``secure_mode`` turned on.
+  warnings.warn(
+sys:1: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+
+[M_A] Initializing single-model training (seed=42, run_seed=42, role=M_A, layers=9,10,11, dp=True)...
+============================================================
+Model: roberta-base | Configuration: 9,10,11 | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 21,855,746 (17.53%)
+============================================================
+[M_A] Optimizer: backbone_lr=1.00e-03, head_lr=3.00e-03, weight_decay=0.0
+[M_A] Opacus PrivacyEngine Active: target_eps=5.0, delta=1e-05, sigma=1.3171, C=1.0
+  [M_A] Step 60/300 | Loss: 0.7166
+  [M_A] Step 120/300 | Loss: 0.7722
+  [M_A] Step 180/300 | Loss: 1.9357
+  [M_A] Step 240/300 | Loss: 1.0866
+  [M_A] Step 300/300 | Loss: 0.8538
+[M_A] Completed 300 steps in 217.22s (Final Loss: 0.8538)
+[M_A] Privacy Spent: epsilon = 4.9934 (at delta=1e-05); accountant recorded 300 noisy steps, optimizer took 300
+
+[M_A] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_A_step1_nowarm_late3_seed42_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_A_step1_nowarm_late3_seed42_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_A_step1_nowarm_late3_seed42_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_A_step1_nowarm_late3_seed42_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_A_step1_nowarm_late3_seed42_validation.npy (6.9 KB)
+[M_A] Extraction Complete! Validation Accuracy: 49.08%
+  Subprocess M_A active with PID: 66904
+[✓] Subprocess M_A completed in 247.96s and terminated cleanly.
+
+[2/3] Spawning Subprocess for Target Model M_B (train on D_B)...
+W1122 18:59:55.205631 68177 .venv/lib/python3.9/site-packages/torch/distributed/elastic/multiprocessing/redirects.py:29] NOTE: Redirects are currently not supported in Windows or MacOs.
+Some weights of RobertaForSequenceClassification were not initialized from the model checkpoint at roberta-base and are newly initialized: ['classifier.dense.bias', 'classifier.dense.weight', 'classifier.out_proj.bias', 'classifier.out_proj.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+/Users/pranav/Documents/privacy-llm-finetuning/.venv/lib/python3.9/site-packages/opacus/accountants/analysis/rdp.py:332: UserWarning: Optimal order is the largest alpha. Please consider expanding the range of alphas to get a tighter privacy bound.
+  warnings.warn(
+/Users/pranav/Documents/privacy-llm-finetuning/.venv/lib/python3.9/site-packages/opacus/privacy_engine.py:98: UserWarning: Secure RNG turned off. This is perfectly fine for experimentation as it allows for much faster training performance, but remember to turn it on and retrain one last time before production with ``secure_mode`` turned on.
+  warnings.warn(
+sys:1: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+
+[M_B] Initializing single-model training (seed=42, run_seed=1042, role=M_B, layers=9,10,11, dp=True)...
+============================================================
+Model: roberta-base | Configuration: 9,10,11 | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 21,855,746 (17.53%)
+============================================================
+[M_B] Optimizer: backbone_lr=1.00e-03, head_lr=3.00e-03, weight_decay=0.0
+[M_B] Opacus PrivacyEngine Active: target_eps=5.0, delta=1e-05, sigma=1.3171, C=1.0
+  [M_B] Step 60/300 | Loss: 1.0327
+  [M_B] Step 120/300 | Loss: 1.0661
+  [M_B] Step 180/300 | Loss: 0.9229
+  [M_B] Step 240/300 | Loss: 0.6574
+  [M_B] Step 300/300 | Loss: 0.7519
+[M_B] Completed 300 steps in 216.40s (Final Loss: 0.7519)
+[M_B] Privacy Spent: epsilon = 4.9934 (at delta=1e-05); accountant recorded 300 noisy steps, optimizer took 300
+
+[M_B] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_B_step1_nowarm_late3_seed42_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_B_step1_nowarm_late3_seed42_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_B_step1_nowarm_late3_seed42_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_B_step1_nowarm_late3_seed42_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_B_step1_nowarm_late3_seed42_validation.npy (6.9 KB)
+[M_B] Extraction Complete! Validation Accuracy: 50.92%
+  Subprocess M_B active with PID: 68177
+[✓] Subprocess M_B completed in 248.32s and terminated cleanly.
+
+[3/3] CPU Post-Processing & Bidirectional Cross-Audit...
+
+======================================================================
+BIDIRECTIONAL CROSS-AUDIT METRICS: step1_nowarm_late3 (Seed 42)
+======================================================================
+Target M_A (Trained on D_A, Shadow Reference M_B):
+  Val Accuracy:       49.08%
+  Final Train Loss:   0.8538
+  RMIA AUC (Primary): 0.5067
+  Loss AUC (Naive):   0.5066
+  RMIA Quantile AUC:  0.5068
+  RMIA TPR @ 5% FPR:  0.0566
+  RMIA TPR @ 1% FPR:  0.0137
+  Calibration Gap:    0.0002
+  Generalization Gap: 0.0010
+
+Target M_B (Trained on D_B, Shadow Reference M_A):
+  Val Accuracy:       50.92%
+  Final Train Loss:   0.7519
+  RMIA AUC (Primary): 0.5072
+  Loss AUC (Naive):   0.5088
+  RMIA Quantile AUC:  0.5071
+  RMIA TPR @ 5% FPR:  0.0576
+  RMIA TPR @ 1% FPR:  0.0107
+  Calibration Gap:    -0.0016
+  Generalization Gap: 0.0012
+[✓] Appended 2 per-model records to results/grid/step1_warmup_check.jsonl
+
+======================================================================
+SWAP-PAIR RUN COMPLETE in 506.87s
+Summary log: None
+======================================================================

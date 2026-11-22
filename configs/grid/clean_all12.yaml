@@ -1,0 +1,16 @@
+# Second-half core grid: clean_all12 (comparison: context). Non-private utility reference.
+# Same settings as the pilot clean baseline (configs/baseline_full_clean.yaml).
+exp_name: clean_all12
+comparison: "context"
+model_name: roberta-base
+train_layers: "all"
+freeze_embeddings: true
+use_dp: false
+lr: 3.0e-5
+weight_decay: 0.0
+warmup_frac: 0.05
+max_length: 128
+max_steps: 1000
+logical_batch_size: 64
+physical_batch_size: 16
+target_delta: 1.0e-5

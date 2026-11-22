@@ -51,7 +51,11 @@ if not torch.cuda.is_available():
 
 
 class TextClassificationDataset(Dataset):
-    """PyTorch Dataset for raw text sentiment classification items."""
+    """PyTorch Dataset for raw text sentiment classification items.
+
+    `access_count` counts __getitem__ calls. For the private training split this is
+    used as a guard: no private example may be fetched before Opacus accounting starts.
+    """
     def __init__(self, items: List[Dict[str, Any]], tokenizer, max_length: int = 128):
         self.encodings = tokenizer(
             [item["raw"] for item in items],
@@ -59,14 +63,57 @@ class TextClassificationDataset(Dataset):
             max_length=max_length,
         )
         self.labels = [int(item["label"]) for item in items]
+        self.access_count = 0
 
     def __len__(self) -> int:
         return len(self.labels)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        self.access_count += 1
         item = {key: torch.tensor(val[idx]) for key, val in self.encodings.items()}
         item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
         return item
+
+
+# --------------------------------------------------------------------------- public warmup data
+# Public sentiment data used ONLY for the optional clean classifier-head warmup.
+# IMDb (Maas et al., 2011) is used rather than Rotten Tomatoes because SST-2 is built from
+# the Rotten Tomatoes sentences of Pang & Lee (2005): that corpus overlaps the private pool.
+PUBLIC_WARMUP_DATASET = "stanfordnlp/imdb"
+PUBLIC_WARMUP_SPLIT = "train"
+PUBLIC_WARMUP_N = 2048          # balanced: 1024 negative + 1024 positive
+PUBLIC_WARMUP_SAMPLE_SEED = 0   # fixed across all runs/seeds -> identical warmup data everywhere
+
+
+def load_public_warmup_items(n: int = PUBLIC_WARMUP_N, sample_seed: int = PUBLIC_WARMUP_SAMPLE_SEED):
+    """Fixed, class-balanced sample of IMDb train reviews (public data, no privacy cost)."""
+    from datasets import load_dataset
+    ds = load_dataset(PUBLIC_WARMUP_DATASET, split=PUBLIC_WARMUP_SPLIT)
+    rng = np.random.default_rng(sample_seed)
+    labels = np.asarray(ds["label"])
+    items = []
+    for y in (0, 1):
+        idx = np.flatnonzero(labels == y)
+        pick = rng.choice(idx, size=n // 2, replace=False)
+        for i in sorted(pick.tolist()):
+            text = ds[int(i)]["text"].replace("<br />", " ")
+            items.append({"raw": text, "label": int(y)})
+    return items
+
+
+def pick_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def _empty_cache(device: torch.device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
 
 
 def attach_telemetry(optimizer, clip_c: float):
@@ -104,7 +151,7 @@ def train_single_model(
 ) -> dict:                  # Returns telemetry & validation accuracy
     """Trains a single model for max_steps, extracts logits on all 5 splits, and saves them to disk."""
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = pick_device()
 
     exp_name = config.get("exp_name", "experiment")
     model_name = config.get("model_name", "roberta-base")
@@ -119,8 +166,20 @@ def train_single_model(
     warmup_frac = float(config.get("warmup_frac", 0.05))
     clip_c = float(config.get("max_grad_norm", 1.0))
     max_length = int(config.get("max_length", 128))
-    # Steps for clean head pre-alignment before DP wrapping (disabled for non-DP runs)
-    head_warmup_steps = int(config.get("head_warmup_steps", 100)) if use_dp else 0
+    # Optional clean classifier-head warmup before DP training (DP runs only).
+    #   head_warmup_source: "none"                -> no warmup (default)
+    #                       "public"              -> IMDb public sentiment data, no privacy cost
+    #                       "private_unaccounted" -> legacy pilot behaviour: warmup on the PRIVATE
+    #                                                split before Opacus attaches. Breaks the DP
+    #                                                guarantee; kept only to reproduce pilot runs.
+    head_warmup_source = str(config.get("head_warmup_source", "none")) if use_dp else "none"
+    head_warmup_steps = int(config.get("head_warmup_steps", 0)) if use_dp else 0
+    if head_warmup_source not in ("none", "public", "private_unaccounted"):
+        raise ValueError(f"Unknown head_warmup_source '{head_warmup_source}'")
+    if head_warmup_source == "none":
+        head_warmup_steps = 0
+    elif head_warmup_steps <= 0:
+        raise ValueError(f"head_warmup_source='{head_warmup_source}' requires head_warmup_steps > 0")
 
     logical_batch_size = int(config.get("logical_batch_size", config.get("batch_size", 64)))
     physical_batch_size = int(config.get("physical_batch_size", config.get("physical_batch", 16)))
@@ -167,27 +226,42 @@ def train_single_model(
     )
     model.to(device)
 
+    trainable_modules = sorted({
+        n.split(".encoder.layer.")[1].split(".")[0] if ".encoder.layer." in n else n.split(".")[0]
+        for n, p in model.named_parameters() if p.requires_grad
+    }, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else s))
+
     # ------------------------------------------------------------------
-    # Head warmup (clean, before PrivacyEngine): aligns the randomly
-    # initialised classification head with pretrained representations.
-    # This is the most impactful fix for DP utility collapse.
+    # Optional clean head warmup (before PrivacyEngine). Only the classifier
+    # head is updated. With source="public" it uses IMDb, never the private split.
     # ------------------------------------------------------------------
+    warmup_final_loss = None
     if use_dp and head_warmup_steps > 0:
-        print(f"[{role}] Running {head_warmup_steps}-step clean head warmup (lr=1e-3, no DP)...")
         head_warmup_lr = float(config.get("head_warmup_lr", 1e-3))
+        if head_warmup_source == "public":
+            warmup_items = load_public_warmup_items()
+            warmup_ds = TextClassificationDataset(warmup_items, tokenizer=tokenizer, max_length=max_length)
+            warmup_loader = DataLoader(warmup_ds, batch_size=logical_batch_size, shuffle=True,
+                                       collate_fn=collator, generator=gen)
+            print(f"[{role}] Running {head_warmup_steps}-step clean head warmup on PUBLIC "
+                  f"{PUBLIC_WARMUP_DATASET} ({len(warmup_items)} reviews, lr={head_warmup_lr:g})...")
+        else:
+            warmup_loader = train_loader
+            print(f"[{role}] WARNING: {head_warmup_steps}-step head warmup on the PRIVATE split "
+                  f"outside DP accounting (legacy pilot behaviour; guarantee does not hold).")
         warmup_head_optimizer = torch.optim.AdamW(
             list(model.classifier.parameters()),
             lr=head_warmup_lr,
             weight_decay=0.0,
         )
         model.train()
-        warmup_loader_iter = iter(train_loader)
+        warmup_loader_iter = iter(warmup_loader)
         warmup_step = 0
         while warmup_step < head_warmup_steps:
             try:
                 batch = next(warmup_loader_iter)
             except StopIteration:
-                warmup_loader_iter = iter(train_loader)
+                warmup_loader_iter = iter(warmup_loader)
                 batch = next(warmup_loader_iter)
             warmup_head_optimizer.zero_grad()
             batch_inputs = {k: v.to(device) for k, v in batch.items()}
@@ -195,9 +269,12 @@ def train_single_model(
             outputs.loss.backward()
             warmup_head_optimizer.step()
             warmup_step += 1
+        warmup_final_loss = float(outputs.loss.item())
+        # Backbone gradients from the warmup backward pass must not leak into DP training.
+        model.zero_grad(set_to_none=True)
         del warmup_head_optimizer
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        print(f"[{role}] Head warmup complete. Final warmup loss: {outputs.loss.item():.4f}")
+        _empty_cache(device)
+        print(f"[{role}] Head warmup complete. Final warmup loss: {warmup_final_loss:.4f}")
 
     model.train()
 
@@ -225,6 +302,9 @@ def train_single_model(
     telemetry = None
     noise_multiplier = 0.0
     epsilon_spent = None
+    sample_rate = None
+    private_accesses_before_dp = None
+    accountant_steps = None
 
     if use_dp:
         if not ModuleValidator.is_valid(model):
@@ -245,6 +325,13 @@ def train_single_model(
                 _groups = [{"params": [p for p in model.parameters() if p.requires_grad],
                             "lr": lr, "weight_decay": weight_decay}]
             optimizer = torch.optim.AdamW(_groups)
+
+        # Guard: no private example may have been fetched before accounting starts.
+        private_accesses_before_dp = train_ds.access_count
+        if private_accesses_before_dp > 0 and head_warmup_source != "private_unaccounted":
+            raise RuntimeError(
+                f"{private_accesses_before_dp} private examples were accessed before PrivacyEngine "
+                f"attached; the DP guarantee would not cover them.")
 
         sample_rate = logical_batch_size / len(train_items)
         noise_multiplier = get_noise_multiplier(
@@ -329,7 +416,11 @@ def train_single_model(
     # Compute spent epsilon if DP was used
     if use_dp and privacy_engine is not None:
         epsilon_spent = float(privacy_engine.get_epsilon(target_delta))
-        print(f"[{role}] Privacy Spent: epsilon = {epsilon_spent:.4f} (at delta={target_delta})")
+        accountant_steps = int(sum(h[2] for h in privacy_engine.accountant.history))
+        print(f"[{role}] Privacy Spent: epsilon = {epsilon_spent:.4f} (at delta={target_delta}); "
+              f"accountant recorded {accountant_steps} noisy steps, optimizer took {step}")
+        if accountant_steps != step:
+            raise RuntimeError(f"Accountant steps {accountant_steps} != optimizer steps {step}")
 
     clip_fraction = 0.0
     if telemetry and telemetry["total_samples"] > 0:
@@ -381,14 +472,32 @@ def train_single_model(
     # Clean memory
     del model, optimizer, train_loader
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    _empty_cache(device)
+
+    from src.data import partition_hash
+    import hashlib
+    _h = hashlib.sha256()
+    for k in sorted(it["key"] for it in train_items):
+        _h.update(k.encode("utf-8"))
 
     return {
         "role": role,
         "seed": seed,
+        "run_seed": run_seed,
         "exp_name": exp_name,
         "train_split": train_split_name,
+        "partition_hash": partition_hash({k: v for k, v in partitions.items()
+                                          if k in ("A", "B", "out", "pop", "tune")}),
+        "train_split_fingerprint": _h.hexdigest(),
+        "device": str(device),
+        "trainable_modules": trainable_modules,
+        "head_warmup_source": head_warmup_source,
+        "head_warmup_steps": head_warmup_steps,
+        "warmup_final_loss": warmup_final_loss,
+        "private_accesses_before_dp": private_accesses_before_dp,
+        "accountant_steps": accountant_steps,
+        "sample_rate": sample_rate,
+        "clean_trainable_fraction_pct": fraction,
         "trainable_params": trainable_params,
         "val_accuracy": val_accuracy,
         "final_loss": final_loss,

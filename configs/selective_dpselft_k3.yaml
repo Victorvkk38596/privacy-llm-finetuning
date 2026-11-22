@@ -10,6 +10,7 @@ target_delta: 1.0e-5
 max_grad_norm: 1.0
 lr: 1.0e-3
 weight_decay: 0.0
+head_warmup_source: private_unaccounted   # PILOT ONLY: warmup on private split outside DP accounting
 head_warmup_steps: 100
 head_warmup_lr: 1.0e-3
 max_steps: 300

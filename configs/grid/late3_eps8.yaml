@@ -1,0 +1,21 @@
+# Second-half core grid: late3_eps8  (comparison: budget)
+# Training settings are the revised pilot's DP settings, unchanged across the grid.
+exp_name: late3_eps8
+comparison: "budget"
+model_name: roberta-base
+train_layers: "9,10,11"
+freeze_embeddings: true
+use_dp: true
+target_epsilon: 8.0
+target_delta: 1.0e-5
+max_grad_norm: 1.0
+lr: 1.0e-3            # backbone; head uses 3x (src/train.py)
+weight_decay: 0.0
+warmup_frac: 0.05     # LR-schedule warmup (not data warmup)
+max_length: 128
+max_steps: 300
+logical_batch_size: 64
+physical_batch_size: 16
+head_warmup_source: public     # IMDb public sentiment data (src/train.py); no private data before accounting
+head_warmup_steps: 100
+head_warmup_lr: 1.0e-3

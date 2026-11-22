@@ -170,7 +170,72 @@ def append_to_summary_csv(csv_path: str, rows: List[dict]):
     print(f"[✓] Appended {len(rows)} verified 22-column summary rows to {csv_path}")
 
 
-def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/logits", summary_csv: str = "results/summary.csv") -> dict:
+TOTAL_PARAMS = 124647170
+
+# Training-setting keys copied verbatim into every per-model record.
+SETTING_KEYS = ["max_steps", "lr", "weight_decay", "logical_batch_size", "physical_batch_size",
+                "max_grad_norm", "max_length", "warmup_frac", "head_warmup_source",
+                "head_warmup_steps", "head_warmup_lr", "freeze_embeddings", "model_name"]
+
+
+def build_record(role: str, config: dict, seed: int, telemetry: dict, metrics: dict,
+                 config_path: str = None) -> dict:
+    """One self-contained JSON record per trained model (results/grid/records.jsonl)."""
+    use_dp = bool(config.get("use_dp", False))
+    tp = int(telemetry["trainable_params"])
+    rec = {
+        "status": "ok",
+        "exp_name": config.get("exp_name"),
+        "comparison": config.get("comparison"),
+        "config_path": config_path,
+        "seed": seed,
+        "role": role,
+        "train_split": "D_A" if role == "M_A" else "D_B",
+        "nonmember_split": "D_out",
+        "reference_model": "M_B" if role == "M_A" else "M_A",
+        "partition_hash": telemetry.get("partition_hash"),
+        "manifest": f"manifests/manifest_seed{seed}.json",
+        "train_split_fingerprint": telemetry.get("train_split_fingerprint"),
+        "train_layers": str(config.get("train_layers")),
+        "trainable_modules": telemetry.get("trainable_modules"),
+        "trainable_params": tp,
+        "param_fraction_pct": round(100.0 * tp / TOTAL_PARAMS, 4),
+        "use_dp": use_dp,
+        "target_epsilon": float(config["target_epsilon"]) if use_dp else None,
+        "target_delta": float(config.get("target_delta", 1e-5)) if use_dp else None,
+        "epsilon_spent": telemetry.get("epsilon_spent"),
+        "noise_multiplier": telemetry.get("noise_multiplier") if use_dp else None,
+        "sample_rate": telemetry.get("sample_rate"),
+        "accountant_steps": telemetry.get("accountant_steps"),
+        "private_accesses_before_dp": telemetry.get("private_accesses_before_dp"),
+        "head_warmup_source_effective": telemetry.get("head_warmup_source"),
+        "warmup_final_loss": telemetry.get("warmup_final_loss"),
+        "val_accuracy": float(telemetry["val_accuracy"]),
+        "final_train_loss": float(telemetry["final_loss"]),
+        "clip_fraction": telemetry.get("clip_fraction"),
+        "steps_completed": telemetry.get("steps_completed"),
+        "train_time_sec": telemetry.get("train_time_sec"),
+        "device": telemetry.get("device"),
+        "n_audit_in": 1024,
+        "n_audit_out": 1024,
+    }
+    for k in SETTING_KEYS:
+        rec[k] = config.get(k)
+    for k, v in metrics.items():
+        rec[k] = float(v)
+    return rec
+
+
+def append_records(path: str, records: List[dict]):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, sort_keys=True) + "\n")
+    print(f"[✓] Appended {len(records)} per-model records to {path}")
+
+
+def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/logits",
+                     summary_csv: str = None, records_path: str = None, config_path: str = None) -> dict:
     """Executes the swap pair in isolated subprocesses and performs bidirectional cross-auditing."""
     exp_name = config.get("exp_name", "experiment")
     print("\n" + "=" * 70)
@@ -287,10 +352,17 @@ def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/lo
     print(f"  Calibration Gap:    {metrics_B['calibration_gap']:.4f}")
     print(f"  Generalization Gap: {metrics_B['generalization_gap']:.4f}")
 
-    # Build and append the two summary rows
+    # Build summary rows. The legacy 22-column CSV is only written when explicitly requested
+    # (historical pilot CSVs in results/ are kept intact).
     row_A = build_summary_row("M_A", exp_name, config, seed, res_A, metrics_A)
     row_B = build_summary_row("M_B", exp_name, config, seed, res_B, metrics_B)
-    append_to_summary_csv(summary_csv, [row_A, row_B])
+    if summary_csv:
+        append_to_summary_csv(summary_csv, [row_A, row_B])
+    if records_path:
+        append_records(records_path, [
+            build_record("M_A", config, seed, res_A, metrics_A, config_path),
+            build_record("M_B", config, seed, res_B, metrics_B, config_path),
+        ])
 
     return {
         "exp_name": exp_name,
@@ -320,7 +392,12 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="results/logits")
-    parser.add_argument("--summary_csv", type=str, default="results/summary.csv")
+    parser.add_argument("--summary_csv", type=str, default=None,
+                        help="Optional legacy 22-column CSV to append to (pilot format). Off by default.")
+    parser.add_argument("--records", type=str, default="results/grid/records.jsonl",
+                        help="JSONL file receiving one full record per trained model.")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="Override any config key (YAML-parsed value). Repeatable.")
 
     args = parser.parse_args()
 
@@ -328,6 +405,11 @@ def parse_args():
     if args.config:
         with open(args.config, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
+
+    # --set KEY=VALUE overrides (applied before the dedicated CLI flags)
+    for kv in args.set:
+        k, v = kv.split("=", 1)
+        config[k.strip()] = yaml.safe_load(v)
 
     # CLI flags override YAML config
     if args.exp_name is not None:
@@ -412,6 +494,8 @@ def main():
         seed=seed,
         output_dir=output_dir,
         summary_csv=summary_csv,
+        records_path=args.records,
+        config_path=args.config,
     )
     total_time = time.time() - t_start
 
