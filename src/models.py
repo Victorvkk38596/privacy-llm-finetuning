@@ -36,6 +36,21 @@ def param_groups(model):
     return groups
 
 
+def trainable_summary(model):
+    """What actually trains: per-group trainable parameter counts and the sorted list of trainable
+    encoder block indices. Groups come from param_groups(): embeddings, layer{i}, head, other."""
+    groups = param_groups(model)
+    counts = {}
+    total = 0
+    for p in model.parameters():
+        total += p.numel()
+        if p.requires_grad:
+            g = groups[id(p)]
+            counts[g] = counts.get(g, 0) + p.numel()
+    blocks = sorted(int(g[5:]) for g in counts if g.startswith("layer"))
+    return {"groups": dict(sorted(counts.items())), "blocks": blocks, "total_params": int(total)}
+
+
 def get_model(model_name: str, num_labels: int, train_layers: str, freeze_embeddings: bool = True):
     """
     Loads model and selectively freezes parameters.

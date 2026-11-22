@@ -187,6 +187,16 @@ python run_experiment.py --config configs/control_H_prime.yaml
 
 Run these commands from the repository root. They assume the listed configuration files exist in the current checkout.
 
+## Second-Half Core Grid (corrected method)
+
+The pilot v2 head warmup on the private split has been removed; DP runs now refuse to read a private
+example before the Opacus accountant is attached (`src/privacy_guard.py`). The three-seed grid
+(layer location, privacy budget, trainable block count) is defined in `scripts/grid_spec.py` and run
+in stages with `scripts/run_core_grid.py`; per-model JSON records go to `results/grid/records/` and
+`scripts/aggregate_grid.py` builds the tables and figures. See `RESULTS_PENDING.md` for the exact
+commands and the list of pending runs. The CSVs already in `results/` are pilot results and are not
+written by the new default paths.
+
 ## Execution Pipeline
 
 The standard experiment follows this workflow:

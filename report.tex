@@ -20,6 +20,7 @@
 \usepackage{caption}
 \usepackage{parskip}
 \usepackage{longtable}
+\usepackage{graphicx}
 
 % ── Colours ───────────────────────────────────────────────────────────────────
 \definecolor{iitblue}{RGB}{26,35,126}
@@ -67,8 +68,8 @@
   {\LARGE\bfseries\color{iitblue}
     Privacy-Utility Trade-off in\\[3pt]
     Differentially Private LLM Fine-Tuning}\\[6pt]
-  {\large\textbf{Midterm Progress Report}}\\[4pt]
-  {\normalsize Hardware aware DL (Sem VII) $\;\cdot\;$ IIT Guwahati $\;\cdot\;$ October 2026}\\[4pt]
+  {\large\textbf{Midterm Report with Second-Half Method Update}}\\[4pt]
+  {\normalsize Hardware aware DL (Sem VII) $\;\cdot\;$ IIT Guwahati $\;\cdot\;$ October 2026; updated November 2026}\\[4pt]
   {\normalsize
     G Jayagiri $\;\cdot\;$
     Vasudev Krishna $\;\cdot\;$
@@ -146,7 +147,7 @@ yields bidirectional empirical MIA metrics across layer positions and parameter 
 identical privacy budgets.
 
 % ══════════════════════════════════════════════════════════════════════════════
-\section{Achievements to Date}
+\section{Midterm Achievements and Pilot Results}
 
 \subsection{Infrastructure Built}
 
@@ -170,7 +171,7 @@ We built an end-to-end experimental framework to ensure reproducible training an
         grid under the symmetric swap-pair protocol with automated metric aggregation.
 \end{itemize}
 
-\subsection{Experiments Completed}
+\subsection{Pilot Experiments (Midterm)}
 
 Two full grid sweeps were executed on Kaggle GPU hardware (RoBERTa-base, GLUE SST-2, $N{=}1024$,
 $\delta{=}10^{-5}$). In the initial sweep (v1), all DP configurations collapsed to 50.0\%
@@ -178,10 +179,18 @@ accuracy because the unaligned classification head received high gradient noise 
 In the revised sweep (v2), we introduced a 100-step clean head warmup and differential learning
 rates before engaging DP-SGD, resolving the collapse. Results are summarized in Table~\ref{tab:results}.
 
+\noindent\fcolorbox{warnred}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{\small
+\textbf{Status of these numbers (November 2026).} Every value in Table~\ref{tab:results} is a
+\emph{pilot result}: one seed (42), one swap pair per configuration. In the v2 sweep the 100 head-warmup
+steps used non-private AdamW on the private training split ($D_A$/$D_B$) before Opacus was attached, so
+the accountant did not cover them and the reported $\varepsilon$ is not an end-to-end guarantee for the v2
+models. The second half removes this stage (Section~\ref{sec:corrected}). The pilot numbers are kept
+unchanged for reference and are not combined with the corrected runs.}}
+
 \begin{table}[htbp]
 \centering
 \small
-\caption{Validation accuracy and membership-inference attack AUC for initial runs (v1) and revised head-warmed runs (v2).}
+\caption{\textbf{Pilot results} (seed 42 only). Validation accuracy and membership-inference attack AUC for initial runs (v1) and revised head-warmed runs (v2; head warmup on the private split, not covered by the accountant).}
 \label{tab:results}
 \setlength{\tabcolsep}{4pt}
 \renewcommand{\arraystretch}{1.15}
@@ -216,34 +225,36 @@ Control $H'$ & Blocks 9--11 + Head & 17.5\% & 4.7 & 50.0\% & 84.7\% & 0.51 \\
 \end{minipage}
 \end{table}
 
-\subsection{Key Research Findings}
+\subsection{Pilot Observations (single seed; superseded by Section~\ref{sec:corrected})}
 
 \begin{itemize}
   \item \textbf{Layer depth governs DP utility at constant parameter count.} All three-layer
         configurations update exactly 17.5\% of model parameters, yet accuracy rises from 72.2\%
-        (early blocks 0--2) to 84.8\% (late blocks 9--11). This represents a 12.6 percentage point
-        gain attributable entirely to layer position.
+        (early blocks 0--2) to 84.8\% (late blocks 9--11), a 12.6 percentage point gap in this
+        single-seed pilot. Whether the gap repeats across seeds without the private warmup is what
+        the corrected grid tests.
   \item \textbf{Selective late tuning outperforms full DP fine-tuning.} Tuning only layers 9--11
         achieves 84.8\% accuracy, exceeding full DP fine-tuning (81.0\%) by 3.8 percentage points
-        despite updating $3.9\times$ fewer parameters (17.5\% vs.\ 68.7\%). This confirms that
-        high-dimensional gradient noise ($\propto \sqrt{d_\Lambda}\sigma C$) degrades representation
-        quality across lower layers when the full backbone is updated.
+        despite updating $3.9\times$ fewer parameters (17.5\% vs.\ 68.7\%). This is consistent with
+        the noise-dimension argument (total noise $\propto \sqrt{d_\Lambda}\sigma C$), but one seed does
+        not establish it.
   \item \textbf{Contiguous late layers match or exceed algorithmic selection.} The DP-SelFT
         selection algorithm identified blocks (3, 6, 4) and reached 82.9\% accuracy. However,
         contiguous late layers (Control $H'$, blocks 9--11) reached 84.7\% under the exact same
-        $\varepsilon = 4.7$ budget, showing that simple proximity to the output head provides
-        stronger representation adaptation than scattered block selection.
-  \item \textbf{Formal DP bounds empirical leakage across all layers.} All DP configurations
-        produced RMIA AUC values between 0.49 and 0.53, indicating that membership leakage remains
-        near chance regardless of parameter fraction or layer position.
+        $\varepsilon = 4.7$ budget in this pilot. The selection step's proxy labels were copied from
+        the nearest private $D_{\text{tune}}$ example without noise, so $\varepsilon_{\text{sel}} = 0.3$
+        does not cover it; automatic selection therefore remains a pilot result only.
+  \item \textbf{Near-chance RMIA AUC for all DP pilot runs.} All DP configurations produced RMIA
+        AUC values between 0.49 and 0.53. This describes the evaluated offline RMIA attack (one
+        reference model) under this setup; it is an empirical measurement, not a consequence of the
+        formal guarantee, which in any case did not cover the v2 warmup stage.
   \item \textbf{Head-only fine-tuning creates an informational bottleneck.} Updating only the
-        classification head (0.48\% of parameters) reached only 58.0\% accuracy, demonstrating
-        that frozen backbone representations cannot separate sentiment classes without at least
-        partial transformer block adaptation.
+        classification head (0.48\% of parameters) reached only 58.0\% accuracy (one of the two models
+        stayed at the majority class), suggesting that partial block adaptation matters under DP.
 \end{itemize}
 
 % ══════════════════════════════════════════════════════════════════════════════
-\section{Current Limitations \& Second-Half Roadmap}
+\section{Midterm Limitations \& Roadmap (as written at midterm)}
 
 \subsection{Methodological Limitations}
 
@@ -290,7 +301,7 @@ L6 & Single task evaluation (SST-2 sentiment); cross-task generalization unverif
 \end{tabularx}
 \end{table}
 
-\subsection{Second-Half Schedule}
+\subsection{Second-Half Schedule (as planned at midterm)}
 
 \begin{table}[htbp]
 \centering
@@ -318,12 +329,197 @@ L6 & Single task evaluation (SST-2 sentiment); cross-task generalization unverif
 \end{table}
 
 \bigskip
-\textbf{Summary.}
+\textbf{Midterm summary (pilot).}
 The core training pipeline, layer tournament, and swap-pair auditing framework are operational.
-Our primary midterm finding demonstrates that selective fine-tuning of late transformer layers
-(blocks 9--11) under DP-SGD achieves 84.8\% validation accuracy, outperforming full DP
-fine-tuning (81.0\%) while keeping membership leakage near chance (RMIA AUC 0.51). The remaining
-work will map the complete privacy-utility Pareto frontier across multiple seeds, test tighter
-privacy budgets ($\varepsilon \le 1.0$), and evaluate the $k$-fraction scaling curve.
+In the single-seed pilot, selective fine-tuning of late transformer layers (blocks 9--11) under
+DP-SGD reached 84.8\% validation accuracy versus 81.0\% for full DP fine-tuning, with RMIA AUC
+near 0.5. These pilot models used a private-split head warmup that the accountant did not cover;
+the corrected method and three-seed grid are described in Section~\ref{sec:corrected}.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Second Half: Corrected Method and Core Grid}\label{sec:corrected}
+
+\subsection{Correction to the classifier warmup}
+
+\textbf{What changed.} The pilot v2 pipeline ran 100 non-private AdamW steps on the classifier head
+using batches from the private training split, and only then called \texttt{make\_private}. That
+stage has been removed. \texttt{src/train.py} now accepts \texttt{head\_warmup\_source} $\in$
+\{\texttt{none}, \texttt{public\_imdb}\}; the default is \texttt{none}, and any other value (including a
+private-split warmup) raises an error. The optional public warmup uses a seeded, class-balanced sample of
+4{,}096 reviews from IMDb (\texttt{stanfordnlp/imdb}, train split, IMDb's own review-level labels), the
+same 100 steps at learning rate $10^{-3}$, and the same data for every DP configuration within a seed.
+
+\textbf{Enforced ordering.} The private training split is wrapped in a ledger
+(\texttt{src/privacy\_guard.py}). In a DP run, reading any private example before the Opacus
+accountant is attached raises an error. The one library-internal exception is Opacus'
+\texttt{DPDataLoader} constructor, which reads \texttt{dataset[0]} to learn tensor shapes for empty Poisson
+batches; these reads are logged separately and the ledger checks that no optimizer step occurs during them.
+After training, each model's record stores: the event index at which accounting started, the index of the
+first private read, the accountant's step count at that read (must be 0), and whether the accountant's
+total step count equals the number of logical optimizer steps.
+
+\textbf{Smoke test and step-1 decision.} \texttt{scripts/run\_core\_grid.py --stage smoke} runs a 3-step
+late-3 DP swap pair and checks those conditions, and also checks that a private-split warmup is rejected.
+The step-1 gate then trains early-3, late-3 and all-12 at $\varepsilon = 5$, seed 42, with no warmup.
+Rule fixed before any corrected run: a model has \emph{collapsed} if validation accuracy $< 55\%$ or it
+predicts the positive class for fewer than 5\% or more than 95\% of validation examples (majority-class
+accuracy on SST-2 validation is 50.92\%). If any gate model collapses, the gate is repeated with the
+public IMDb warmup, and whichever variant is chosen is applied to every DP configuration. The
+no-warmup runs stay in the records either way.
+
+\subsection{What the privacy accounting covers}
+
+The guarantee is per model: $M_A$ is $(\varepsilon,\delta)$-DP with respect to $D_A$ and $M_B$ with
+respect to $D_B$, under add/remove-one adjacency, Poisson sampling ($q = 64/1024$) and the Opacus RDP
+accountant. Table~\ref{tab:coverage} lists every stage that touches data.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Data, stages and assumptions behind the reported $\varepsilon$ (corrected method).}
+\label{tab:coverage}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{@{}>{\RaggedRight\arraybackslash}p{3.6cm} >{\RaggedRight\arraybackslash}p{3.2cm} >{\RaggedRight\arraybackslash}X@{}}
+\toprule
+\textbf{Stage} & \textbf{Data} & \textbf{Covered by accountant?} \\
+\midrule
+DP-SGD fine-tuning (300 steps, $C{=}1$, noise $\sigma$) & private $D_A$ / $D_B$ & \textbf{Yes.} Opacus RDP accountant; accounted $\varepsilon$ saved per model. \\
+\rowcolor{rowgray}
+Pretrained \texttt{roberta-base}; random head init & public / none & Not needed. Assumes pretraining data is public and does not single out private records. \\
+Optional head warmup & public IMDb & Not needed (public data). Assumes IMDb is public and disjoint from the private SST-2 records. \\
+\rowcolor{rowgray}
+Opacus empty-batch shape probe & one private example's tensor shape & Not covered. Feeds no update; only the shape of an empty batch depends on it. Logged per run. \\
+Dedup, conflict removal, family forest, partition & all of SST-2 \texttt{train} & Not covered. The guarantee is stated for $D_A$ as given, conditional on the partition. \\
+\rowcolor{rowgray}
+Hyperparameters (learning rates, 300 steps, $3\times$ head LR, warmup decision) & pilot runs on seed-42 $D_A$/$D_B$, SST-2 validation & \textbf{Not covered.} Chosen after looking at private-trained pilot models and at the validation set that is also used for reporting. \\
+Post-training logits for the audit & $D_A$, $D_B$, $D_{\text{out}}$, $D_{\text{pop}}$ & Evaluation only; logits are not released. \\
+\rowcolor{rowgray}
+Noise generation & --- & Opacus with \texttt{secure\_mode=False} (standard PRNG); the analysis assumes ideal Gaussian noise. \\
+Automatic layer selection (DP-SelFT pilot) & $D_{\text{tune}}$, IMDb & Not in the core grid. Proxy labels are copied from private $D_{\text{tune}}$ without noise, so $\varepsilon_{\text{sel}}$ does not cover them. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Because of the hyperparameter row, the end-to-end guarantee for the released models is not fully
+established: the reported $\varepsilon$ covers the training run for fixed hyperparameters only.
+
+\textbf{Independent accounting check.} \texttt{scripts/rdp\_crosscheck.py} recomputes $\varepsilon$ with a
+separate integer-order RDP implementation (numpy only). For the pilot's logged noise multipliers it gives
+5.017 vs.\ 4.993 ($\sigma = 1.3171$, 300 steps), 4.696 vs.\ 4.695 ($\sigma = 1.3684$) and 4.999 vs.\ 4.999
+($\sigma = 2.0557$, 1000 steps), always at or slightly above Opacus as expected for integer orders only.
+For the grid ($q = 1/16$, $T = 300$, $\delta = 10^{-5}$) it implies $\sigma \approx 4.54$, $1.32$ and $1.02$
+for $\varepsilon = 1$, 5 and 8.
+
+\subsection{Core grid design}
+
+Seeds 42, 43 and 44. Each (configuration, seed) is one two-model swap pair ($M_A$ on $D_A$ audited with
+$M_B$ as reference, and vice versa). Within a seed the partition is deterministic, so every configuration
+uses the same $D_A$, $D_B$, $D_{\text{out}}$ and $D_{\text{pop}}$; the partition hash is saved in each record and
+the analysis refuses to run if two configurations of one seed disagree. All DP configurations share one
+recipe: AdamW, backbone LR $10^{-3}$, head LR $3\times10^{-3}$, weight decay 0, linear schedule with 5\% LR
+warmup, 300 steps, logical batch 64, physical batch 16, $C = 1$, $\delta = 10^{-5}$, embeddings frozen.
+The clean baseline keeps its existing recipe (LR $3\times10^{-5}$, 1000 steps) and is shown for utility
+context only.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Core grid: 9 configurations $\times$ 3 seeds $\times$ 2 models = 54 models. Layer sets follow the repository's existing definitions; the count comparison is anchored at the output end.}
+\label{tab:grid}
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}llrrcl@{}}
+\toprule
+\textbf{Configuration} & \textbf{Trainable blocks (+ head)} & \textbf{Params} & \textbf{\%} & \textbf{$\varepsilon$} & \textbf{Comparisons} \\
+\midrule
+early-3 & 0, 1, 2 & 21{,}855{,}746 & 17.53 & 5 & location \\
+middle-3 & 4, 5, 6 & 21{,}855{,}746 & 17.53 & 5 & location \\
+late-3 & 9, 10, 11 & 21{,}855{,}746 & 17.53 & 5 & location, budget, count \\
+all-12 & 0--11 & 85{,}646{,}594 & 68.71 & 5 & location, count \\
+clean all-12 & 0--11 & 85{,}646{,}594 & 68.71 & $\infty$ & location (context) \\
+late-3, $\varepsilon{=}1$ & 9, 10, 11 & 21{,}855{,}746 & 17.53 & 1 & budget \\
+late-3, $\varepsilon{=}8$ & 9, 10, 11 & 21{,}855{,}746 & 17.53 & 8 & budget \\
+last-1 & 11 & 7{,}680{,}002 & 6.16 & 5 & count \\
+last-6 & 6--11 & 43{,}119{,}362 & 34.59 & 5 & count \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Order of execution: smoke test; step-1 gate (seed 42); one validation run at each remaining setting
+(seed 42); then the remaining seeds. Each model writes a JSON record with seed, swap-pair role, partition
+hash and manifest, trainable layers and per-group parameter counts, training settings, target and accounted
+$\varepsilon$, $\delta$, the accounting ledger, validation accuracy, predicted-positive rate, RMIA ROC-AUC and
+TPR at 1\% FPR. Failed runs get a record with status \texttt{failed} and stay in the tables.
+
+\subsection{Analysis procedure}
+
+For each (configuration, seed) the two swap-pair models are averaged. Configurations are summarised by
+the mean and sample standard deviation of the three seed-level values, with each seed's value shown.
+Comparisons use matched seeds: for each seed, the difference to the reference arm (late-3, $\varepsilon{=}5$)
+is computed, and we report its mean, SD and the number of seeds sharing its sign. A 95\% $t$-interval is also
+saved, but with three seeds it has two degrees of freedom ($t = 4.30$), so its half-width is about
+$2.5\times$ the SD of the differences, and it reflects seed-to-seed variation (partition, initialisation, DP
+noise and data order together), not uncertainty about the population of all possible runs. We call an
+accuracy difference \emph{repeated} only if it has the same sign in all three matched seeds, and make no
+significance claims. RMIA AUC near 0.5 is reported as the result of this offline RMIA attack with one
+reference model, not as evidence about the formal guarantee.
+
+\subsection{Results}
+
+\IfFileExists{results/grid/analysis/table_core.tex}{%
+\begin{table}[htbp]
+\centering
+\scriptsize
+\caption{Corrected core grid. Mean $\pm$ SD over seed-level values (each the mean of the two swap-pair models); $\hat\varepsilon$ is the mean accounted $\varepsilon$. Counts in parentheses mark configurations with fewer than three completed seeds; $^\dagger$ marks at least one collapsed model. Per-seed values: \texttt{results/grid/analysis/summary.csv}.}
+\label{tab:grid_results}
+\input{results/grid/analysis/table_core.tex}
+\end{table}
+}{%
+\noindent\fcolorbox{iitblue}{white}{\parbox{\dimexpr\textwidth-2\fboxsep-2\fboxrule}{\small
+\textbf{No corrected runs yet (22 November 2026).} The environment used for this update had no GPU and no
+deep-learning libraries, so none of the 54 corrected models has been trained. The code changes and local
+checks are complete; the exact commands and the full list of pending configurations and seeds are in
+\texttt{RESULTS\_PENDING.md}. This table and the figures are generated from
+\texttt{results/grid/analysis/} by \texttt{scripts/aggregate\_grid.py} and appear here automatically once
+the runs exist.}}}
+
+\IfFileExists{results/grid/analysis/fig_location.pdf}{%
+\begin{figure}[htbp]\centering
+\includegraphics[width=\textwidth]{results/grid/analysis/fig_location.pdf}
+\includegraphics[width=\textwidth]{results/grid/analysis/fig_budget.pdf}
+\includegraphics[width=\textwidth]{results/grid/analysis/fig_count.pdf}
+\caption{Location, budget and count comparisons. Each point is one seed (mean of its swap pair); lines join matched seeds; black bars show mean $\pm$ SD over seeds. Dashed lines: majority-class accuracy, chance AUC (0.5) and chance TPR at 1\% FPR (0.01).}
+\label{fig:grid}
+\end{figure}}{}
+
+\subsection{Claims supported at this point}
+
+\begin{itemize}
+  \item In DP runs the code can no longer read a private training example before the accountant is
+        attached, and it rejects private-split warmup (enforced in code; unit-tested on the ledger;
+        end-to-end smoke test pending).
+  \item The pilot's logged $\varepsilon$ values are reproduced to within 0.5\% by an independent accountant.
+  \item No new utility or leakage claims are made until the corrected runs exist. The pilot numbers in
+        Table~\ref{tab:results} remain single-seed pilot results.
+\end{itemize}
+
+\subsection{Limitations and remaining work}
+
+\begin{itemize}
+  \item \textbf{Pending runs.} Smoke test, step-1 gate, validation runs and the three-seed grid
+        (\texttt{RESULTS\_PENDING.md}). Runtime estimates will use measured wall time from the first
+        completed runs (\texttt{aggregate\_grid.py} with \texttt{--estimate}); no measured runtime
+        exists yet.
+  \item \textbf{Hyperparameters were chosen with private data} (pilot runs and the reporting validation set),
+        which the accountant does not cover.
+  \item \textbf{Three seeds} give only a rough view of variability; intervals are wide.
+  \item \textbf{One audit.} Offline RMIA with a single reference model is a fairly weak attacker;
+        near-chance AUC does not rule out leakage to stronger attacks (more reference models, canaries).
+  \item \textbf{Recipe fixed across budgets.} The same 300-step recipe is used at $\varepsilon = 1$, where
+        $\sigma \approx 4.5$; collapse there would describe this recipe, not DP at $\varepsilon = 1$ in general.
+  \item \textbf{Clean baseline} uses a different recipe (1000 steps, LR $3\times10^{-5}$) and is context only.
+  \item \textbf{Middle-3} is the repository's existing definition (blocks 4--6), which is not exactly centred.
+  \item \textbf{Deferred to a separate pass:} automatic layer selection (pilot only, see Table~\ref{tab:coverage}),
+        LoRA, canary extraction and a second dataset.
+\end{itemize}
 
 \end{document}

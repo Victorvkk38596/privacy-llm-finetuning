@@ -10,7 +10,12 @@ Implements methodology_audit.md §3.1–§3.3, §4.1 and methodology_audit_adden
      - Audit 1: Target = M_A, Shadow Reference = M_B, Members = D_A, Non-members = D_out, Population = D_pop.
      - Audit 2: Target = M_B, Shadow Reference = M_A, Members = D_B, Non-members = D_out, Population = D_pop.
   3. Results Logging:
-     - Appends exactly two verified 22-column summary rows to results/summary.csv.
+     - Appends two 22-column summary rows to --summary_csv (default results/grid/summary_rows.csv;
+       the historical pilot CSVs in results/ are never written by default).
+     - Writes one JSON record per model to --records_dir (default results/grid/records), holding
+       seed, swap-pair role, partition hash / manifest, trainable layers and parameter counts,
+       training settings, target and accounted epsilon, delta, accounting-order ledger, validation
+       accuracy, RMIA AUC and TPR at 1% FPR. Failed runs also get a record (status="failed").
 """
 import argparse
 import csv
@@ -31,9 +36,11 @@ if str(project_root) not in sys.path:
 import numpy as np
 import yaml
 
-from src.data import get_partitions
+from src.data import get_partitions, export_manifest, partition_hash
 from src.audit import evaluate_attacks, load_logits
 from src.train import train_single_model
+
+RECORD_SCHEMA = "grid-record-v1"
 
 # --------------------------------------------------------------------------- Schema Contract
 CSV_COLUMNS = [
@@ -149,7 +156,11 @@ def append_to_summary_csv(csv_path: str, rows: List[dict]):
             first_line = f.readline().strip()
         existing_cols = [c.strip() for c in first_line.split(",") if c.strip()]
         if existing_cols != CSV_COLUMNS:
-            legacy_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "summary_legacy.csv")
+            # Never overwrite an existing archive (results/summary_legacy.csv is a pilot record).
+            base = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "summary_legacy")
+            legacy_path = base + ".csv"
+            if os.path.exists(legacy_path):
+                legacy_path = f"{base}_{time.strftime('%Y%m%d_%H%M%S')}.csv"
             print(f"[!] Warning: {csv_path} header does not match 22-column schema v2.")
             print(f"    Archiving existing summary to {legacy_path}")
             shutil.copy2(csv_path, legacy_path)
@@ -170,9 +181,151 @@ def append_to_summary_csv(csv_path: str, rows: List[dict]):
     print(f"[✓] Appended {len(rows)} verified 22-column summary rows to {csv_path}")
 
 
-def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/logits", summary_csv: str = "results/summary.csv") -> dict:
+def _env_info() -> dict:
+    info = {"python": sys.version.split()[0]}
+    for mod in ("torch", "transformers", "opacus", "datasets", "numpy", "sklearn"):
+        try:
+            info[mod] = __import__(mod).__version__
+        except Exception:
+            info[mod] = None
+    try:
+        import torch
+        info["device"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    except Exception:
+        info["device"] = None
+    try:
+        import subprocess
+        info["git_commit"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(project_root),
+                                            capture_output=True, text=True).stdout.strip() or None
+    except Exception:
+        info["git_commit"] = None
+    return info
+
+
+def record_path(records_dir: str, exp_name: str, seed: int, role: str) -> str:
+    return os.path.join(records_dir, f"{exp_name}__seed{seed}__{role}.json")
+
+
+def build_record(role: str, config: dict, seed: int, telemetry: dict, attack_metrics: dict,
+                 manifest_path: str, wall_time_sec: float, env: dict) -> dict:
+    use_dp = bool(config.get("use_dp", False))
+    other = "M_B" if role == "M_A" else "M_A"
+    return {
+        "schema": RECORD_SCHEMA,
+        "status": "ok",
+        "exp_name": config.get("exp_name"),
+        "config_name": config.get("config_name", config.get("exp_name")),
+        "comparisons": config.get("comparisons", []),
+        "seed": int(seed),
+        "role": role,
+        "train_split": "D_A" if role == "M_A" else "D_B",
+        "audit": {"members": "D_A" if role == "M_A" else "D_B", "nonmembers": "D_out",
+                  "population": "D_pop", "reference_model": other},
+        "partition_hash": telemetry.get("partition_hash"),
+        "manifest_path": manifest_path,
+        "train_layers_spec": str(config.get("train_layers")),
+        "trainable_blocks": telemetry.get("trainable_blocks"),
+        "trainable_groups": telemetry.get("trainable_groups"),
+        "trainable_params": int(telemetry.get("trainable_params", 0)),
+        "total_params": telemetry.get("total_params"),
+        "trainable_fraction_pct": telemetry.get("trainable_fraction_pct"),
+        "training": {
+            "model_name": config.get("model_name", "roberta-base"),
+            "use_dp": use_dp,
+            "freeze_embeddings": bool(config.get("freeze_embeddings", True)),
+            "optimizer": "AdamW",
+            "lr_backbone": float(config.get("lr")),
+            "lr_head": telemetry.get("head_lr"),
+            "weight_decay": float(config.get("weight_decay", 0.0)),
+            "lr_schedule": f"linear, {float(config.get('warmup_frac', 0.05)):g} warmup fraction",
+            "max_steps": int(config.get("max_steps")),
+            "steps_completed": telemetry.get("steps_completed"),
+            "logical_batch_size": int(config.get("logical_batch_size", 64)),
+            "physical_batch_size": int(config.get("physical_batch_size", 16)),
+            "max_grad_norm": float(config.get("max_grad_norm", 1.0)),
+            "max_length": int(config.get("max_length", 128)),
+            "head_warmup": telemetry.get("head_warmup"),
+        },
+        "privacy": {
+            "target_epsilon": float(config["target_epsilon"]) if use_dp else None,
+            "target_delta": float(config.get("target_delta", 1e-5)) if use_dp else None,
+            "accounted_epsilon": telemetry.get("epsilon_spent"),
+            "accountant": telemetry.get("accountant"),
+            "noise_multiplier": float(telemetry.get("noise_multiplier", 0.0)) if use_dp else None,
+            "sample_rate": telemetry.get("sample_rate"),
+            "accounting_ledger": telemetry.get("privacy_ledger"),
+        },
+        "metrics": {
+            "val_accuracy": telemetry.get("val_accuracy"),
+            "val_pred_pos_rate": telemetry.get("val_pred_pos_rate"),
+            **{k: float(v) for k, v in attack_metrics.items()},
+        },
+        "final_train_loss": telemetry.get("final_loss"),
+        "clip_fraction": telemetry.get("clip_fraction"),
+        "train_time_sec": telemetry.get("train_time_sec"),
+        "wall_time_sec": wall_time_sec,
+        "logit_paths": telemetry.get("logit_paths"),
+        "env": env,
+        "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+def write_record(records_dir: str, rec: dict, role: str) -> str:
+    os.makedirs(records_dir, exist_ok=True)
+    path = record_path(records_dir, rec["exp_name"], rec["seed"], role)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=2)
+    return path
+
+
+def write_failure_records(records_dir: str, config: dict, seed: int, error: str, roles=("M_A", "M_B")) -> None:
+    for role in roles:
+        rec = {
+            "schema": RECORD_SCHEMA, "status": "failed", "exp_name": config.get("exp_name"),
+            "config_name": config.get("config_name", config.get("exp_name")),
+            "comparisons": config.get("comparisons", []), "seed": int(seed), "role": role,
+            "train_layers_spec": str(config.get("train_layers")),
+            "privacy": {"target_epsilon": config.get("target_epsilon") if config.get("use_dp") else None,
+                        "target_delta": config.get("target_delta") if config.get("use_dp") else None},
+            "training": {"use_dp": bool(config.get("use_dp")),
+                         "head_warmup": {"source": config.get("head_warmup_source", "none")}},
+            "error": error[-4000:], "env": _env_info(),
+            "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        write_record(records_dir, rec, role)
+
+
+def ensure_manifest(seed: int, out_dir: str = "manifests") -> str:
+    """Exports manifests/manifest_seed{seed}.json if missing; never overwrites an existing one."""
+    path = os.path.join(project_root, out_dir, f"manifest_seed{seed}.json")
+    part = get_partitions(seed=seed)
+    core = {k: part[k] for k in ("A", "B", "out", "pop", "tune")}
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            existing = json.load(f).get("partition_hash")
+        if existing != partition_hash(core):
+            raise RuntimeError(f"Partition for seed {seed} ({partition_hash(core)}) does not match {path} ({existing})")
+        return path
+    return export_manifest(core, seed=seed, out_dir=os.path.join(project_root, out_dir))
+
+
+def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/logits",
+                     summary_csv: str = "results/grid/summary_rows.csv",
+                     records_dir: str = "results/grid/records") -> dict:
     """Executes the swap pair in isolated subprocesses and performs bidirectional cross-auditing."""
+    try:
+        return _run_orchestrator(config, seed, output_dir, summary_csv, records_dir)
+    except Exception as e:
+        import traceback
+        write_failure_records(records_dir, config, seed, f"{e}\n{traceback.format_exc()}")
+        raise
+
+
+def _run_orchestrator(config: dict, seed: int, output_dir: str, summary_csv: str, records_dir: str) -> dict:
     exp_name = config.get("exp_name", "experiment")
+    t_wall = time.time()
+    manifest_path = ensure_manifest(seed)
+    env = _env_info()
     print("\n" + "=" * 70)
     print(f"MASTER SUBPROCESS ORCHESTRATOR: {exp_name} (Seed {seed})")
     print(f"Layers: {config.get('train_layers')} | DP: {config.get('use_dp')} | Max Steps: {config.get('max_steps')}")
@@ -292,6 +445,14 @@ def run_orchestrator(config: dict, seed: int = 42, output_dir: str = "results/lo
     row_B = build_summary_row("M_B", exp_name, config, seed, res_B, metrics_B)
     append_to_summary_csv(summary_csv, [row_A, row_B])
 
+    wall = time.time() - t_wall
+    for role, res, met in (("M_A", res_A, metrics_A), ("M_B", res_B, metrics_B)):
+        rec = build_record(role, config, seed, res, met, manifest_path, wall, env)
+        led = (rec["privacy"].get("accounting_ledger") or {})
+        if config.get("use_dp") and not (led.get("ordering_ok") and led.get("steps_match_ok")):
+            rec["status"] = "privacy_check_failed"
+        print(f"[✓] Record written: {write_record(records_dir, rec, role)} (status={rec['status']})")
+
     return {
         "exp_name": exp_name,
         "seed": seed,
@@ -320,7 +481,11 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="results/logits")
-    parser.add_argument("--summary_csv", type=str, default="results/summary.csv")
+    parser.add_argument("--summary_csv", type=str, default="results/grid/summary_rows.csv",
+                        help="22-column row log. Default avoids touching the pilot CSVs in results/.")
+    parser.add_argument("--records_dir", type=str, default="results/grid/records")
+    parser.add_argument("--head_warmup_source", type=str, default=None,
+                        help="Override config: 'none' or 'public_imdb'. Private-split warmup is not allowed.")
 
     args = parser.parse_args()
 
@@ -387,6 +552,9 @@ def parse_args():
         config["model_name"] = args.model_name
 
     config["freeze_embeddings"] = args.freeze_embeddings
+    if args.head_warmup_source is not None:
+        config["head_warmup_source"] = args.head_warmup_source
+    config.setdefault("head_warmup_source", "none")
 
     # Dry run presets
     if args.dry_run:
@@ -412,6 +580,7 @@ def main():
         seed=seed,
         output_dir=output_dir,
         summary_csv=summary_csv,
+        records_dir=args.records_dir,
     )
     total_time = time.time() - t_start
 

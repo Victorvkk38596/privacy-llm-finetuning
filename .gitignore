@@ -16,3 +16,6 @@ __pycache__/
 
 # Temporary outputs
 results/kaggle_run/
+
+# Regenerated per run by scripts/run_core_grid.py
+results/grid/configs_used/

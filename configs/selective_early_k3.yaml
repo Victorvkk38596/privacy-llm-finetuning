@@ -9,8 +9,9 @@ target_delta: 1.0e-5
 max_grad_norm: 1.0
 lr: 1.0e-3
 weight_decay: 0.0
-head_warmup_steps: 100
-head_warmup_lr: 1.0e-3
+# Pilot v2 ran 100 non-private head-warmup steps on the private split here; that stage was not
+# covered by the DP accountant and has been removed. Public warmup: head_warmup_source: public_imdb
+head_warmup_source: none
 max_steps: 300
 logical_batch_size: 64
 physical_batch_size: 16

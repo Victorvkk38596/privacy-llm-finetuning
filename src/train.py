@@ -40,9 +40,18 @@ from opacus.accountants.utils import get_noise_multiplier
 from opacus.utils.batch_memory_manager import BatchMemoryManager
 from opacus.validators import ModuleValidator
 
-from src.data import get_partitions
-from src.models import get_model
+from src.data import get_partitions, partition_hash
+from src.models import get_model, trainable_summary
 from src.audit import extract_logits, save_logits, load_logits
+from src.privacy_guard import PrivacyLedger, GuardedDataset, accountant_total_steps
+from src.public_warmup import load_public_warmup_items, warmup_fingerprint, PUBLIC_WARMUP_SOURCES
+
+# Allowed values for config key `head_warmup_source`.
+#   "none"        : no warmup (default; the corrected method).
+#   "public_imdb" : non-private head warmup on public IMDb reviews (see src/public_warmup.py).
+# Warmup on the private split (the pilot v2 behaviour) is no longer supported because the
+# DP accountant does not cover it.
+WARMUP_SOURCES = ("none",) + tuple(PUBLIC_WARMUP_SOURCES)
 
 
 # Optimize CPU execution if GPU is unavailable
@@ -119,8 +128,17 @@ def train_single_model(
     warmup_frac = float(config.get("warmup_frac", 0.05))
     clip_c = float(config.get("max_grad_norm", 1.0))
     max_length = int(config.get("max_length", 128))
-    # Steps for clean head pre-alignment before DP wrapping (disabled for non-DP runs)
-    head_warmup_steps = int(config.get("head_warmup_steps", 100)) if use_dp else 0
+    # Optional non-private head warmup. It may only use PUBLIC data (never the private split).
+    head_warmup_source = str(config.get("head_warmup_source", "none"))
+    if head_warmup_source not in WARMUP_SOURCES:
+        raise ValueError(
+            f"head_warmup_source='{head_warmup_source}' is not allowed. Use one of {WARMUP_SOURCES}. "
+            "Warmup on the private training split is not covered by the DP accountant."
+        )
+    head_warmup_steps = int(config.get("head_warmup_steps", 100)) if head_warmup_source != "none" else 0
+    if not use_dp:
+        head_warmup_steps = 0  # clean baseline keeps its original recipe (no warmup)
+    head_warmup_n_examples = int(config.get("head_warmup_n_examples", 4096))
 
     logical_batch_size = int(config.get("logical_batch_size", config.get("batch_size", 64)))
     physical_batch_size = int(config.get("physical_batch_size", config.get("physical_batch", 16)))
@@ -149,7 +167,12 @@ def train_single_model(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
-    train_ds = TextClassificationDataset(train_items, tokenizer=tokenizer, max_length=max_length)
+    # Every read of a private training example goes through the ledger. For DP runs a read
+    # before the PrivacyEngine is attached raises PrivateDataAccessError.
+    ledger = PrivacyLedger(require_accounting=use_dp, split_name=split_key)
+    train_ds = GuardedDataset(
+        TextClassificationDataset(train_items, tokenizer=tokenizer, max_length=max_length), ledger
+    )
     train_loader = DataLoader(
         train_ds,
         batch_size=logical_batch_size,
@@ -167,37 +190,60 @@ def train_single_model(
     )
     model.to(device)
 
+    trainable_info = trainable_summary(model)
+    head_warmup_lr = float(config.get("head_warmup_lr", 1e-3))
+    warmup_info = {"source": head_warmup_source, "steps": head_warmup_steps}
+
     # ------------------------------------------------------------------
-    # Head warmup (clean, before PrivacyEngine): aligns the randomly
-    # initialised classification head with pretrained representations.
-    # This is the most impactful fix for DP utility collapse.
+    # Optional head warmup on PUBLIC data only (before PrivacyEngine).
+    # Uses its own DataLoader; the private train_ds is never touched here,
+    # and the ledger would raise if it were.
     # ------------------------------------------------------------------
-    if use_dp and head_warmup_steps > 0:
-        print(f"[{role}] Running {head_warmup_steps}-step clean head warmup (lr=1e-3, no DP)...")
-        head_warmup_lr = float(config.get("head_warmup_lr", 1e-3))
-        warmup_head_optimizer = torch.optim.AdamW(
-            list(model.classifier.parameters()),
-            lr=head_warmup_lr,
-            weight_decay=0.0,
-        )
+    if head_warmup_steps > 0:
+        pub_items = load_public_warmup_items(head_warmup_source, seed=seed, n_examples=head_warmup_n_examples)
+        pub_ds = TextClassificationDataset(pub_items, tokenizer=tokenizer, max_length=max_length)
+        pub_gen = torch.Generator()
+        pub_gen.manual_seed(seed)  # same warmup batches for every config within a seed
+        pub_loader = DataLoader(pub_ds, batch_size=logical_batch_size, shuffle=True,
+                                collate_fn=collator, generator=pub_gen)
+        print(f"[{role}] Public head warmup: {head_warmup_steps} steps on {head_warmup_source} "
+              f"({len(pub_items)} examples), lr={head_warmup_lr:g}, no DP, private split untouched")
+        # Only the head receives gradients during warmup; restore flags afterwards.
+        saved_flags = {n: p.requires_grad for n, p in model.named_parameters()}
+        for n, p in model.named_parameters():
+            p.requires_grad = n.startswith("classifier.")
+        warmup_head_optimizer = torch.optim.AdamW(list(model.classifier.parameters()),
+                                                  lr=head_warmup_lr, weight_decay=0.0)
         model.train()
-        warmup_loader_iter = iter(train_loader)
-        warmup_step = 0
-        while warmup_step < head_warmup_steps:
+        it_pub = iter(pub_loader)
+        warmup_losses = []
+        for _ in range(head_warmup_steps):
             try:
-                batch = next(warmup_loader_iter)
+                batch = next(it_pub)
             except StopIteration:
-                warmup_loader_iter = iter(train_loader)
-                batch = next(warmup_loader_iter)
+                it_pub = iter(pub_loader)
+                batch = next(it_pub)
             warmup_head_optimizer.zero_grad()
-            batch_inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**batch_inputs)
+            outputs = model(**{k: v.to(device) for k, v in batch.items()})
             outputs.loss.backward()
             warmup_head_optimizer.step()
-            warmup_step += 1
+            warmup_losses.append(float(outputs.loss.item()))
         del warmup_head_optimizer
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-        print(f"[{role}] Head warmup complete. Final warmup loss: {outputs.loss.item():.4f}")
+        for n, p in model.named_parameters():
+            p.requires_grad = saved_flags[n]
+            p.grad = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        warmup_info.update({
+            "n_examples": len(pub_items),
+            "fingerprint": warmup_fingerprint(pub_items),
+            "lr": head_warmup_lr,
+            "final_loss": warmup_losses[-1],
+            "mean_loss_last10": float(np.mean(warmup_losses[-10:])),
+        })
+        ledger.record_public_warmup(head_warmup_source, len(pub_items), head_warmup_steps,
+                                    fingerprint=warmup_info["fingerprint"])
+        print(f"[{role}] Public head warmup complete. Final warmup loss: {warmup_losses[-1]:.4f}")
 
     model.train()
 
@@ -256,14 +302,19 @@ def train_single_model(
         )
 
         privacy_engine = PrivacyEngine(accountant="rdp")
-        model, optimizer, train_loader = privacy_engine.make_private(
-            module=model,
-            optimizer=optimizer,
-            data_loader=train_loader,
-            noise_multiplier=noise_multiplier,
-            max_grad_norm=clip_c,
-        )
+        # Opacus' DPDataLoader constructor reads train_ds[0] to get shapes/dtypes for empty
+        # Poisson batches. That read feeds no update; it is logged as a metadata read.
+        with ledger.metadata_access("opacus_dpdataloader_shape_probe"):
+            model, optimizer, train_loader = privacy_engine.make_private(
+                module=model,
+                optimizer=optimizer,
+                data_loader=train_loader,
+                noise_multiplier=noise_multiplier,
+                max_grad_norm=clip_c,
+            )
         telemetry = attach_telemetry(optimizer, clip_c=clip_c)
+        # Accounting is live from here on; only now may private examples be read.
+        ledger.activate_accounting(accountant_total_steps(privacy_engine.accountant) or 0)
         print(f"[{role}] Opacus PrivacyEngine Active: target_eps={target_epsilon}, delta={target_delta}, sigma={noise_multiplier:.4f}, C={clip_c}")
 
     warmup_steps = int(max_steps * warmup_frac)
@@ -298,6 +349,7 @@ def train_single_model(
                     if not getattr(optimizer, "_is_last_step_skipped", False):
                         scheduler.step()
                         step += 1
+                        ledger.on_logical_step(step, accountant_total_steps(privacy_engine.accountant))
                         if step % max(1, max_steps // 5) == 0 or step == max_steps:
                             print(f"  [{role}] Step {step}/{max_steps} | Loss: {final_loss:.4f}")
                         if step >= max_steps:
@@ -317,6 +369,7 @@ def train_single_model(
                 optimizer.step()
                 scheduler.step()
                 step += 1
+                ledger.on_logical_step(step, None)
                 final_loss = float(loss.item())
                 if step % max(1, max_steps // 5) == 0 or step == max_steps:
                     print(f"  [{role}] Step {step}/{max_steps} | Loss: {final_loss:.4f}")
@@ -327,9 +380,19 @@ def train_single_model(
     print(f"[{role}] Completed {step} steps in {train_time:.2f}s (Final Loss: {final_loss:.4f})")
 
     # Compute spent epsilon if DP was used
+    acct_steps = None
     if use_dp and privacy_engine is not None:
         epsilon_spent = float(privacy_engine.get_epsilon(target_delta))
+        acct_steps = accountant_total_steps(privacy_engine.accountant)
         print(f"[{role}] Privacy Spent: epsilon = {epsilon_spent:.4f} (at delta={target_delta})")
+    ledger_summary = ledger.finalize(acct_steps)
+    if use_dp:
+        print(f"[{role}] Accounting-order check: ordering_ok={ledger_summary['ordering_ok']} "
+              f"(accounting event {ledger_summary['accounting_activated_event']} < first private read event "
+              f"{ledger_summary['first_private_read_event']}; accountant steps at first private read = "
+              f"{ledger_summary['accountant_steps_at_first_private_read']}), "
+              f"steps_match_ok={ledger_summary['steps_match_ok']} "
+              f"(accountant {acct_steps} vs logical {step})")
 
     clip_fraction = 0.0
     if telemetry and telemetry["total_samples"] > 0:
@@ -351,6 +414,7 @@ def train_single_model(
 
     logit_paths = {}
     val_accuracy = 0.0
+    val_pred_pos_rate = None
 
     eval_batch_size = 64
     for split_name, items in splits_to_eval:
@@ -372,6 +436,7 @@ def train_single_model(
             preds = np.argmax(logits, axis=-1)
             labels = np.array([it["label"] for it in items])
             val_accuracy = float(np.mean(preds == labels) * 100.0)
+            val_pred_pos_rate = float(np.mean(preds == 1))  # collapse diagnostic
 
         file_size_kb = os.path.getsize(filepath) / 1024.0
         print(f"  Cached {split_name:10s} logits: shape {str(logits.shape):10s} -> {filepath} ({file_size_kb:.1f} KB)")
@@ -389,14 +454,25 @@ def train_single_model(
         "seed": seed,
         "exp_name": exp_name,
         "train_split": train_split_name,
+        "partition_hash": partition_hash({k: partitions[k] for k in ("A", "B", "out", "pop", "tune")}),
         "trainable_params": trainable_params,
+        "trainable_fraction_pct": float(fraction),
+        "trainable_groups": trainable_info["groups"],
+        "trainable_blocks": trainable_info["blocks"],
+        "total_params": trainable_info["total_params"],
         "val_accuracy": val_accuracy,
+        "val_pred_pos_rate": val_pred_pos_rate,
         "final_loss": final_loss,
         "epsilon_spent": epsilon_spent,
         "noise_multiplier": noise_multiplier,
+        "sample_rate": (logical_batch_size / len(train_items)) if use_dp else None,
+        "accountant": "rdp" if use_dp else None,
         "clip_fraction": clip_fraction,
         "steps_completed": step,
         "train_time_sec": train_time,
+        "head_lr": lr * 3.0,
+        "head_warmup": warmup_info,
+        "privacy_ledger": ledger_summary,
         "logit_paths": logit_paths,
     }
 

@@ -50,28 +50,31 @@ os.chdir(repo_dir)
 print("\n[2/4] Installing requirements from cloned repo...", flush=True)
 subprocess.run(f"{sys.executable} -m pip install -q -r requirements.txt", shell=True, check=True)
 
-# 3. Define the 8 core grid configs
-configs = [
-    "baseline_full_clean.yaml",
-    "baseline_full_dp.yaml",
-    "head_only_dp.yaml",
-    "selective_early_k3.yaml",
-    "selective_mid_k3.yaml",
-    "selective_late_k3.yaml",
-    "selective_dpselft_k3.yaml",
-    "control_H_prime.yaml"
-]
+# 3. Second-half core grid (scripts/run_core_grid.py). Edit STAGE / WARMUP before each push:
+#    smoke -> gate (none) -> [gate (public_imdb) only if the first gate collapses] -> validate -> grid
+STAGE = os.environ.get("GRID_STAGE", "smoke")      # smoke | gate | validate | grid
+WARMUP = os.environ.get("GRID_WARMUP", "none")     # none | public_imdb (from results/grid/warmup_decision_*.json)
+SEEDS = os.environ.get("GRID_SEEDS", "")           # e.g. "43" to split the grid across sessions
 
-# 4. Execute all runs sequentially
-print("\n[3/4] Running Core Grid (8 Configurations sequentially)...", flush=True)
-sep = "=" * 70
-for idx, cfg in enumerate(configs, 1):
-    print(f"\n{sep}\n[KAGGLE WORKER {idx}/8] Executing: {cfg}\n{sep}", flush=True)
-    cmd = f"{sys.executable} run_experiment.py --config configs/{cfg}"
-    subprocess.run(cmd, shell=True, check=True)
+# Restore records from earlier sessions (attach the previous kernel output as a dataset) so
+# completed swap pairs are skipped.
+prev = "/kaggle/input/privacy-llm-grid-results/grid"
+if os.path.isdir(prev):
+    subprocess.run(f"mkdir -p results && cp -rn {prev} results/", shell=True)
+    print(f"[+] Restored previous results from {prev}", flush=True)
 
-# 5. Export results to /kaggle/working so Kaggle CLI can download them
-print("\n[4/4] Exporting results to /kaggle/working...", flush=True)
-subprocess.run("cp results/summary.csv /kaggle/working/summary.csv", shell=True)
-subprocess.run("cp -r results/logits /kaggle/working/", shell=True)
-print("\n[✓] ALL 8 CONFIGURATIONS COMPLETED SUCCESSFULLY!", flush=True)
+print(f"\n[3/4] Running stage={STAGE} warmup={WARMUP} seeds={SEEDS or 'all'}...", flush=True)
+cmd = f"{sys.executable} scripts/run_core_grid.py --stage {STAGE}"
+if STAGE != "smoke":
+    cmd += f" --warmup {WARMUP}"
+if SEEDS and STAGE == "grid":
+    cmd += f" --seeds {SEEDS}"
+rc = subprocess.run(cmd, shell=True).returncode
+
+# 4. Export results (records, logits, logs, decision files) for download with `kaggle kernels output`
+print("\n[4/4] Exporting results/grid to /kaggle/working/grid ...", flush=True)
+subprocess.run("rm -rf /kaggle/working/grid && cp -r results/grid /kaggle/working/grid", shell=True)
+subprocess.run(f"{sys.executable} scripts/aggregate_grid.py --records results/grid/records "
+               f"--out /kaggle/working/grid/analysis --warmup {WARMUP} --estimate", shell=True)
+print(f"\n[done] stage={STAGE} exit={rc}", flush=True)
+sys.exit(rc)
