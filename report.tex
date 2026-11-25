@@ -374,6 +374,13 @@ steps; private-split warmup was rejected. Without warmup, all six gate models co
 the same result. With the public IMDb warmup all six learned (early-3 76.4/76.5\%, late-3 85.2/85.4\%,
 all-12 78.3/80.3\%), so \texttt{public\_imdb} was used for every DP configuration.
 
+\IfFileExists{results/grid/analysis/fig_warmup_gate.pdf}{%
+\begin{figure}[htbp]\centering
+\includegraphics[width=0.62\textwidth]{results/grid/analysis/fig_warmup_gate.pdf}
+\caption{Step-1 warmup gate (seed 42, $\varepsilon = 5$), one point per model. Without warmup every model predicts a single class (49.1\% or 50.9\%); with 100 head-warmup steps on public IMDb reviews all six learn.}
+\label{fig:warmup_gate}
+\end{figure}}{}
+
 \subsection{What the privacy accounting covers}
 
 The guarantee is per model: $M_A$ is $(\varepsilon,\delta)$-DP with respect to $D_A$ and $M_B$ with
