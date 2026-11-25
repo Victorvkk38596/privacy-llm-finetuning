@@ -1,0 +1,69 @@
+{
+  "warmup": "public_imdb",
+  "seed": 42,
+  "rule": {
+    "acc_below": 55.0,
+    "pos_rate_outside": [
+      0.05,
+      0.95
+    ],
+    "config_fails_if": "either swap-pair model collapses"
+  },
+  "configs": [
+    {
+      "config": "dp_early3_e5",
+      "exp_name": "dp_early3_e5__w-public_imdb",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        76.37614678899082,
+        76.4908256880734
+      ],
+      "val_pred_pos_rate": [
+        0.4197247706422018,
+        0.4713302752293578
+      ],
+      "collapsed": [
+        false,
+        false
+      ]
+    },
+    {
+      "config": "dp_late3_e5",
+      "exp_name": "dp_late3_e5__w-public_imdb",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        85.20642201834863,
+        85.43577981651376
+      ],
+      "val_pred_pos_rate": [
+        0.5286697247706422,
+        0.5217889908256881
+      ],
+      "collapsed": [
+        false,
+        false
+      ]
+    },
+    {
+      "config": "dp_all_e5",
+      "exp_name": "dp_all_e5__w-public_imdb",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        78.32568807339449,
+        80.27522935779817
+      ],
+      "val_pred_pos_rate": [
+        0.5240825688073395,
+        0.47477064220183485
+      ],
+      "collapsed": [
+        false,
+        false
+      ]
+    }
+  ],
+  "verdict": "learns: use --warmup public_imdb for all DP configs"
+}

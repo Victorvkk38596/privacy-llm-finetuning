@@ -1,8 +1,14 @@
 # Second-half core grid: pending runs
 
-Status on 2026-11-22: **no corrected runs have been executed.** The environment used for the code
-update had no GPU and no PyTorch / Transformers / Opacus, and package installs were blocked. All code
-changes and the checks that do not need those libraries are done (see "Checks run" below).
+**Status on 2026-11-25: complete.** The full grid ran on Kaggle (one T4, about 4.3 h in one background
+version): smoke test passed; the no-warmup gate collapsed (all six models predicted one class), so the
+public IMDb warmup was used; the IMDb gate learned; all 27 swap pairs (54 models) passed the acceptance rule.
+The no-warmup gate was rerun at the end and collapsed again. Records are in `results/grid/records/`,
+analysis in `results/grid/analysis/`, the seed-43/44 manifests in `manifests/`, and the results are written
+up in `report.tex` (section "What the corrected grid shows"). Per-model logits and training logs from that
+run were kept outside the repo, in the downloaded `results/grid` folder.
+
+The rest of this file is kept as the record of how the runs were set up.
 
 Everything below runs from the repository root. Each stage is resumable: swap pairs whose two records
 in `results/grid/records/` have `status: ok` are skipped. Failed runs get a record with

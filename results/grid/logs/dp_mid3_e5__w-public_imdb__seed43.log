@@ -1,0 +1,151 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+======================================================================
+MASTER SUBPROCESS ORCHESTRATOR: dp_mid3_e5__w-public_imdb (Seed 43)
+Layers: 4,5,6 | DP: True | Max Steps: 300
+======================================================================
+
+[1/3] Spawning Subprocess for Target Model M_A (train on D_A)...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+11/25/2026 03:47:04:WARNING:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+[M_A] Initializing single-model training (seed=43, run_seed=43, role=M_A, layers=4,5,6, dp=True)...
+Loading weights:   0%|          | 0/197 [00:00<?, ?it/s]Loading weights: 100%|██████████| 197/197 [00:00<00:00, 2608.56it/s]
+[transformers] [1mRobertaForSequenceClassification LOAD REPORT[0m from: roberta-base
+Key                        | Status     | 
+---------------------------+------------+-
+lm_head.layer_norm.bias    | UNEXPECTED | 
+lm_head.layer_norm.weight  | UNEXPECTED | 
+lm_head.bias               | UNEXPECTED | 
+lm_head.dense.bias         | UNEXPECTED | 
+lm_head.dense.weight       | UNEXPECTED | 
+classifier.out_proj.weight | MISSING    | 
+classifier.out_proj.bias   | MISSING    | 
+classifier.dense.weight    | MISSING    | 
+classifier.dense.bias      | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+/usr/local/lib/python3.13/dist-packages/opacus/accountants/analysis/rdp.py:332: UserWarning: Optimal order is the largest alpha. Please consider expanding the range of alphas to get a tighter privacy bound.
+  warnings.warn(
+/usr/local/lib/python3.13/dist-packages/opacus/privacy_engine.py:98: UserWarning: Secure RNG turned off. This is perfectly fine for experimentation as it allows for much faster training performance, but remember to turn it on and retrain one last time before production with ``secure_mode`` turned on.
+  warnings.warn(
+<sys>:0: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+============================================================
+Model: roberta-base | Configuration: 4,5,6 | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 21,855,746 (17.53%)
+============================================================
+[M_A] Public head warmup: 100 steps on public_imdb (4096 examples), lr=0.001, no DP, private split untouched
+[M_A] Public head warmup complete. Final warmup loss: 0.5205
+[M_A] Optimizer: backbone_lr=1.00e-03, head_lr=3.00e-03, weight_decay=0.0
+[M_A] Opacus PrivacyEngine Active: target_eps=5.0, delta=1e-05, sigma=1.3171, C=1.0
+  [M_A] Step 60/300 | Loss: 0.3038
+  [M_A] Step 120/300 | Loss: 0.7121
+  [M_A] Step 180/300 | Loss: 0.0751
+  [M_A] Step 240/300 | Loss: 0.2793
+  [M_A] Step 300/300 | Loss: 0.4623
+[M_A] Completed 300 steps in 127.20s (Final Loss: 0.4623)
+[M_A] Privacy Spent: epsilon = 4.9934 (at delta=1e-05)
+[M_A] Accounting-order check: ordering_ok=True (accounting event 2 < first private read event 3; accountant steps at first private read = 0), steps_match_ok=True (accountant 300 vs logical 300)
+
+[M_A] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_A_dp_mid3_e5__w-public_imdb_seed43_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_A_dp_mid3_e5__w-public_imdb_seed43_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_A_dp_mid3_e5__w-public_imdb_seed43_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_A_dp_mid3_e5__w-public_imdb_seed43_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_A_dp_mid3_e5__w-public_imdb_seed43_validation.npy (6.9 KB)
+[M_A] Extraction Complete! Validation Accuracy: 84.63%
+  Subprocess M_A active with PID: 1153
+[✓] Subprocess M_A completed in 202.77s and terminated cleanly.
+
+[2/3] Spawning Subprocess for Target Model M_B (train on D_B)...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+11/25/2026 03:50:27:WARNING:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+[M_B] Initializing single-model training (seed=43, run_seed=1043, role=M_B, layers=4,5,6, dp=True)...
+Loading weights:   0%|          | 0/197 [00:00<?, ?it/s]Loading weights: 100%|██████████| 197/197 [00:00<00:00, 2442.07it/s]
+[transformers] [1mRobertaForSequenceClassification LOAD REPORT[0m from: roberta-base
+Key                        | Status     | 
+---------------------------+------------+-
+lm_head.bias               | UNEXPECTED | 
+lm_head.dense.bias         | UNEXPECTED | 
+lm_head.layer_norm.bias    | UNEXPECTED | 
+lm_head.layer_norm.weight  | UNEXPECTED | 
+lm_head.dense.weight       | UNEXPECTED | 
+classifier.out_proj.bias   | MISSING    | 
+classifier.dense.bias      | MISSING    | 
+classifier.out_proj.weight | MISSING    | 
+classifier.dense.weight    | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+/usr/local/lib/python3.13/dist-packages/opacus/accountants/analysis/rdp.py:332: UserWarning: Optimal order is the largest alpha. Please consider expanding the range of alphas to get a tighter privacy bound.
+  warnings.warn(
+/usr/local/lib/python3.13/dist-packages/opacus/privacy_engine.py:98: UserWarning: Secure RNG turned off. This is perfectly fine for experimentation as it allows for much faster training performance, but remember to turn it on and retrain one last time before production with ``secure_mode`` turned on.
+  warnings.warn(
+<sys>:0: UserWarning: Full backward hook is firing when gradients are computed with respect to module outputs since no inputs require gradients. See https://docs.pytorch.org/docs/main/generated/torch.nn.Module.html#torch.nn.Module.register_full_backward_hook for more details.
+============================================================
+Model: roberta-base | Configuration: 4,5,6 | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 21,855,746 (17.53%)
+============================================================
+[M_B] Public head warmup: 100 steps on public_imdb (4096 examples), lr=0.001, no DP, private split untouched
+[M_B] Public head warmup complete. Final warmup loss: 0.6016
+[M_B] Optimizer: backbone_lr=1.00e-03, head_lr=3.00e-03, weight_decay=0.0
+[M_B] Opacus PrivacyEngine Active: target_eps=5.0, delta=1e-05, sigma=1.3171, C=1.0
+  [M_B] Step 60/300 | Loss: 1.7476
+  [M_B] Step 120/300 | Loss: 0.7396
+  [M_B] Step 180/300 | Loss: 1.8573
+  [M_B] Step 240/300 | Loss: 2.0645
+  [M_B] Step 300/300 | Loss: 0.5514
+[M_B] Completed 300 steps in 128.39s (Final Loss: 0.5514)
+[M_B] Privacy Spent: epsilon = 4.9934 (at delta=1e-05)
+[M_B] Accounting-order check: ordering_ok=True (accounting event 2 < first private read event 3; accountant steps at first private read = 0), steps_match_ok=True (accountant 300 vs logical 300)
+
+[M_B] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_B_dp_mid3_e5__w-public_imdb_seed43_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_B_dp_mid3_e5__w-public_imdb_seed43_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_B_dp_mid3_e5__w-public_imdb_seed43_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_B_dp_mid3_e5__w-public_imdb_seed43_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_B_dp_mid3_e5__w-public_imdb_seed43_validation.npy (6.9 KB)
+[M_B] Extraction Complete! Validation Accuracy: 84.98%
+  Subprocess M_B active with PID: 1183
+[✓] Subprocess M_B completed in 203.73s and terminated cleanly.
+
+[3/3] CPU Post-Processing & Bidirectional Cross-Audit...
+
+======================================================================
+BIDIRECTIONAL CROSS-AUDIT METRICS: dp_mid3_e5__w-public_imdb (Seed 43)
+======================================================================
+Target M_A (Trained on D_A, Shadow Reference M_B):
+  Val Accuracy:       84.63%
+  Final Train Loss:   0.4623
+  RMIA AUC (Primary): 0.5147
+  Loss AUC (Naive):   0.5170
+  RMIA Quantile AUC:  0.5147
+  RMIA TPR @ 5% FPR:  0.0547
+  RMIA TPR @ 1% FPR:  0.0088
+  Calibration Gap:    -0.0023
+  Generalization Gap: 0.0092
+
+Target M_B (Trained on D_B, Shadow Reference M_A):
+  Val Accuracy:       84.98%
+  Final Train Loss:   0.5514
+  RMIA AUC (Primary): 0.5048
+  Loss AUC (Naive):   0.5195
+  RMIA Quantile AUC:  0.5048
+  RMIA TPR @ 5% FPR:  0.0391
+  RMIA TPR @ 1% FPR:  0.0078
+  Calibration Gap:    -0.0146
+  Generalization Gap: 0.1565
+[✓] Appended 2 verified 22-column summary rows to results/grid/summary_rows.csv
+[✓] Record written: results/grid/records/dp_mid3_e5__w-public_imdb__seed43__M_A.json (status=ok)
+[✓] Record written: results/grid/records/dp_mid3_e5__w-public_imdb__seed43__M_B.json (status=ok)
+
+======================================================================
+SWAP-PAIR RUN COMPLETE in 418.90s
+Summary log: results/grid/summary_rows.csv
+======================================================================

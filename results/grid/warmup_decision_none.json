@@ -1,0 +1,69 @@
+{
+  "warmup": "none",
+  "seed": 42,
+  "rule": {
+    "acc_below": 55.0,
+    "pos_rate_outside": [
+      0.05,
+      0.95
+    ],
+    "config_fails_if": "either swap-pair model collapses"
+  },
+  "configs": [
+    {
+      "config": "dp_early3_e5",
+      "exp_name": "dp_early3_e5__w-none",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        49.08256880733945,
+        49.08256880733945
+      ],
+      "val_pred_pos_rate": [
+        0.0,
+        0.0
+      ],
+      "collapsed": [
+        true,
+        true
+      ]
+    },
+    {
+      "config": "dp_late3_e5",
+      "exp_name": "dp_late3_e5__w-none",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        49.08256880733945,
+        49.08256880733945
+      ],
+      "val_pred_pos_rate": [
+        0.0,
+        0.0
+      ],
+      "collapsed": [
+        true,
+        true
+      ]
+    },
+    {
+      "config": "dp_all_e5",
+      "exp_name": "dp_all_e5__w-none",
+      "status": "ok",
+      "reasons": [],
+      "val_accuracy": [
+        49.08256880733945,
+        50.917431192660544
+      ],
+      "val_pred_pos_rate": [
+        0.0,
+        1.0
+      ],
+      "collapsed": [
+        true,
+        true
+      ]
+    }
+  ],
+  "verdict": "collapse: rerun gate with --warmup public_imdb and use it for all DP configs"
+}

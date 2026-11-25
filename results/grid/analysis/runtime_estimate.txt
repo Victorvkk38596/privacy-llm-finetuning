@@ -1,0 +1,11 @@
+Runtime estimate from MEASURED completed swap pairs only (wall time per pair, this hardware):
+  clean_all        13.5 min per swap pair (n=3)
+  dp_all_e5        15.3 min per swap pair (n=3)
+  dp_early3_e5      7.3 min per swap pair (n=3)
+  dp_last1_e5       4.7 min per swap pair (n=3)
+  dp_last6_e5       9.5 min per swap pair (n=3)
+  dp_late3_e1       6.6 min per swap pair (n=3)
+  dp_late3_e5       6.6 min per swap pair (n=3)
+  dp_late3_e8       6.6 min per swap pair (n=3)
+  dp_mid3_e5        7.0 min per swap pair (n=3)
+Pending pairs with a measured config: 0 -> ~0.00 h

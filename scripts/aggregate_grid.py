@@ -33,6 +33,15 @@ METRICS = [("val_accuracy", "Validation accuracy (%)"), ("rmia_auc", "RMIA ROC-A
            ("rmia_tpr_at_1fpr", "RMIA TPR at 1% FPR")]
 T_975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776}
 
+# Audit resolution: each RMIA audit scores 1,024 members (D_A or D_B) against 1,024 non-members (D_out).
+# Under no leakage, one audit's AUC has SE sqrt((n1+n2+1)/(12 n1 n2)) ~ 0.0128 and TPR at 1% FPR has
+# SE sqrt(0.01*0.99/n1) ~ 0.0031. The shaded band in the figures is chance +- 2 SE of ONE audit: the range
+# a single model's metric would fall in about 95% of the time if the attack had no signal.
+N_MEMBERS = N_NONMEMBERS = 1024
+AUC_SE = math.sqrt((N_MEMBERS + N_NONMEMBERS + 1) / (12 * N_MEMBERS * N_NONMEMBERS))
+TPR_SE = math.sqrt(0.01 * 0.99 / N_MEMBERS)
+CHANCE_BAND = {"rmia_auc": (0.5, AUC_SE), "rmia_tpr_at_1fpr": (0.01, TPR_SE)}
+
 # Validated categorical slots 1-3 (all-pairs safe) for the three seeds; markers give a second encoding.
 SEED_STYLE = {42: ("#2a78d6", "o"), 43: ("#eb6834", "s"), 44: ("#1baf7a", "^")}
 INK, INK2, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#8a8984", "#e4e3df", "#fcfcfb"
@@ -234,6 +243,8 @@ def figures(seeds, out_dir, warmup):
         arms = spec["arms"] + spec["context"]
         if comp == "budget":
             labels = [f"ε = {CONFIGS[a][1]:g}" for a in arms]
+        elif comp == "count":
+            labels = [{"dp_late3_e5": "last-3"}.get(a, CONFIGS[a][3]) for a in arms]
         else:
             labels = [CONFIGS[a][3] for a in arms]
         fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.5), constrained_layout=True)
@@ -244,6 +255,9 @@ def figures(seeds, out_dir, warmup):
                 ax.spines[sp].set_visible(False)
             ref = {"val_accuracy": SST2_VAL_MAJORITY_ACC, "rmia_auc": 0.5, "rmia_tpr_at_1fpr": 0.01}[k]
             ax.axhline(ref, color=MUTED, linewidth=1, linestyle=(0, (3, 2)), zorder=1)
+            if k in CHANCE_BAND:
+                c, se = CHANCE_BAND[k]
+                ax.axhspan(c - 2 * se, c + 2 * se, color=GRID, alpha=0.6, linewidth=0, zorder=0)
             ax.text(0.99, ref, {"val_accuracy": "majority class", "rmia_auc": "chance", "rmia_tpr_at_1fpr": "chance"}[k],
                     transform=ax.get_yaxis_transform(), fontsize=7, color=MUTED, ha="right", va="bottom")
             # paired seed lines (matched seeds) across the comparison's main arms
@@ -286,7 +300,8 @@ def figures(seeds, out_dir, warmup):
         fig.legend(h[:3], l[:3], loc="outside upper right", ncol=3, frameon=False, fontsize=7.5)
         fig.suptitle(titles[comp], x=0.01, ha="left", fontsize=9, color=INK)
         fig.text(0.01, -0.02, f"Points: seed-level means of the two swap-pair models (lines join matched seeds). "
-                 f"Black bar: mean ± SD over seeds. DP head warmup: {warmup}.", fontsize=6.5, color=INK2)
+                 f"Black bar: mean ± SD over seeds. Grey band: chance ± 2 SE of one audit (1,024 vs 1,024). "
+                 f"DP head warmup: {warmup}.", fontsize=6.5, color=INK2)
         for ext in ("pdf", "png"):
             p = os.path.join(out_dir, f"fig_{comp}.{ext}")
             fig.savefig(p, dpi=200, bbox_inches="tight")
@@ -339,21 +354,32 @@ def pareto_figure(ptab, out_dir, warmup):
     ax.text(0.5, 0.99, " chance AUC", transform=ax.get_xaxis_transform(), fontsize=7, color=MUTED, va="top")
     ax.text(0.99, SST2_VAL_MAJORITY_ACC, "majority class", transform=ax.get_yaxis_transform(), fontsize=7,
             color=MUTED, ha="right", va="bottom")
+    c, se = CHANCE_BAND["rmia_auc"]
+    ax.axvspan(c - 2 * se, c + 2 * se, color=GRID, alpha=0.6, linewidth=0, zorder=0)
+    ax.text(c + 2 * se, 0.14, " chance ± 2 SE\n of one audit", transform=ax.get_xaxis_transform(),
+            fontsize=6.5, color=INK2, va="bottom")
     if len(el):
-        fr = el[el.on_frontier].sort_values("rmia_auc_mean")
-        ax.plot(fr.rmia_auc_mean, fr.val_accuracy_mean, color=INK2, linewidth=1, zorder=2,
-                drawstyle="steps-post", label="frontier (higher acc., lower AUC)")
         for r in el.itertuples():
             dp = bool(r.is_dp)
             ax.errorbar(r.rmia_auc_mean, r.val_accuracy_mean, xerr=r.rmia_auc_sd or 0, yerr=r.val_accuracy_sd or 0,
-                        fmt="o", markersize=7, color=SEED_STYLE[42][0] if dp else INK2,
+                        fmt="o", markersize=6, color=SEED_STYLE[42][0] if dp else INK2,
                         mfc=SEED_STYLE[42][0] if dp else SURFACE, mec=SEED_STYLE[42][0] if dp else INK2,
                         elinewidth=1, capsize=0, zorder=3)
-            ax.annotate(r.label + ("" if dp else " (non-DP)"), (r.rmia_auc_mean, r.val_accuracy_mean),
-                        xytext=(5, 4), textcoords="offset points", fontsize=7, color=INK)
-        ax.legend(loc="best", frameon=False, fontsize=7)
-        lo = min(0.49, float((el.rmia_auc_mean - el.rmia_auc_sd.fillna(0)).min()) - 0.005)
-        hi = max(0.51, float((el.rmia_auc_mean + el.rmia_auc_sd.fillna(0)).max()) + 0.02)
+        # labels in a column to the right of the DP cluster, with leader lines (no overlaps)
+        dp = el[el.is_dp].sort_values("val_accuracy_mean", ascending=False)
+        x_lab = float((el[el.is_dp].rmia_auc_mean + el[el.is_dp].rmia_auc_sd.fillna(0)).max()) + 0.02 if len(dp) else 0.55
+        prev = None
+        for r in dp.itertuples():
+            y = r.val_accuracy_mean if prev is None else min(r.val_accuracy_mean, prev - 2.6)
+            prev = y
+            ax.annotate(r.label, xy=(r.rmia_auc_mean, r.val_accuracy_mean), xytext=(x_lab, y),
+                        fontsize=7, color=INK, va="center",
+                        arrowprops=dict(arrowstyle="-", color=MUTED, linewidth=0.6, shrinkA=0, shrinkB=4))
+        for r in el[~el.is_dp].itertuples():
+            ax.annotate(r.label + " (non-DP)", (r.rmia_auc_mean, r.val_accuracy_mean), xytext=(0, 8),
+                        textcoords="offset points", fontsize=7, color=INK, ha="center")
+        lo = min(c - 2 * se - 0.005, float((el.rmia_auc_mean - el.rmia_auc_sd.fillna(0)).min()) - 0.005)
+        hi = max(x_lab + 0.04, float((el.rmia_auc_mean + el.rmia_auc_sd.fillna(0)).max()) + 0.02)
         ax.set_xlim(lo, hi)
     else:
         ax.text(0.5, 0.5, "no configuration has three valid,\nnon-collapsed seeds yet", transform=ax.transAxes,
@@ -364,7 +390,8 @@ def pareto_figure(ptab, out_dir, warmup):
     excl = ptab[~ptab.eligible]
     note = "Excluded: " + "; ".join(f"{r.label} ({r.excluded_because})" for r in excl.itertuples()) if len(excl) else "Excluded: none"
     import textwrap
-    fig.text(0.01, -0.01, textwrap.fill(note + f". DP head warmup: {warmup}.", 120), fontsize=6.3, color=INK2, va="top")
+    fig.text(0.01, -0.01, textwrap.fill(note + f". DP head warmup: {warmup}. Differences in RMIA AUC smaller than "
+             f"the grey band are within one audit's sampling error.", 120), fontsize=6.3, color=INK2, va="top")
     paths = []
     for ext in ("pdf", "png"):
         p = os.path.join(out_dir, f"fig_pareto.{ext}")

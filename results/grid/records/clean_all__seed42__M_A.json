@@ -1,0 +1,140 @@
+{
+  "schema": "grid-record-v1",
+  "status": "ok",
+  "exp_name": "clean_all",
+  "config_name": "clean_all",
+  "comparisons": [
+    "location"
+  ],
+  "seed": 42,
+  "role": "M_A",
+  "train_split": "D_A",
+  "audit": {
+    "members": "D_A",
+    "nonmembers": "D_out",
+    "population": "D_pop",
+    "reference_model": "M_B"
+  },
+  "partition_hash": "7afbcaf0706ba21a",
+  "manifest_path": "/kaggle/working/privacy-llm-finetuning/manifests/manifest_seed42.json",
+  "train_layers_spec": "all",
+  "trainable_blocks": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "trainable_groups": {
+    "head": 592130,
+    "layer0": 7087872,
+    "layer1": 7087872,
+    "layer10": 7087872,
+    "layer11": 7087872,
+    "layer2": 7087872,
+    "layer3": 7087872,
+    "layer4": 7087872,
+    "layer5": 7087872,
+    "layer6": 7087872,
+    "layer7": 7087872,
+    "layer8": 7087872,
+    "layer9": 7087872
+  },
+  "trainable_params": 85646594,
+  "total_params": 124647170,
+  "trainable_fraction_pct": 68.71122224435581,
+  "training": {
+    "model_name": "roberta-base",
+    "use_dp": false,
+    "freeze_embeddings": true,
+    "optimizer": "AdamW",
+    "lr_backbone": 3e-05,
+    "lr_head": 9e-05,
+    "weight_decay": 0.0,
+    "lr_schedule": "linear, 0.05 warmup fraction",
+    "max_steps": 1000,
+    "steps_completed": 1000,
+    "logical_batch_size": 64,
+    "physical_batch_size": 16,
+    "max_grad_norm": 1.0,
+    "max_length": 128,
+    "head_warmup": {
+      "source": "none",
+      "steps": 0
+    }
+  },
+  "privacy": {
+    "target_epsilon": null,
+    "target_delta": null,
+    "accounted_epsilon": null,
+    "accountant": null,
+    "noise_multiplier": null,
+    "sample_rate": null,
+    "accounting_ledger": {
+      "require_accounting": false,
+      "accounting_activated_event": null,
+      "first_private_read_event": 0,
+      "accountant_steps_at_activation": null,
+      "accountant_steps_at_first_private_read": 0,
+      "n_private_reads": 64000,
+      "n_private_reads_before_accounting": 64000,
+      "logical_steps": 1000,
+      "accountant_total_steps": null,
+      "step_mismatches": [],
+      "public_warmup": null,
+      "metadata_reads": {},
+      "metadata_window_violations": [],
+      "ordering_ok": true,
+      "steps_match_ok": true,
+      "events_head": [
+        {
+          "i": 0,
+          "kind": "first_private_read",
+          "index": 860
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "val_accuracy": 89.22018348623854,
+    "val_pred_pos_rate": 0.5298165137614679,
+    "loss_auc": 0.6401214599609375,
+    "rmia_auc": 0.6428136825561523,
+    "rmia_quant_auc": 0.6428003311157227,
+    "rmia_loss_form_auc": 0.6690506935119629,
+    "rmia_tpr_at_5fpr": 0.123046875,
+    "rmia_tpr_at_1fpr": 0.0830078125,
+    "calibration_gap": 0.0026922225952148438,
+    "generalization_gap": 0.9172556893333907
+  },
+  "final_train_loss": 7.049670239211991e-05,
+  "clip_fraction": 0.0,
+  "train_time_sec": 359.8228907585144,
+  "wall_time_sec": 790.6033165454865,
+  "logit_paths": {
+    "D_A": "results/grid/logits/M_A_clean_all_seed42_D_A.npy",
+    "D_B": "results/grid/logits/M_A_clean_all_seed42_D_B.npy",
+    "D_out": "results/grid/logits/M_A_clean_all_seed42_D_out.npy",
+    "D_pop": "results/grid/logits/M_A_clean_all_seed42_D_pop.npy",
+    "validation": "results/grid/logits/M_A_clean_all_seed42_validation.npy"
+  },
+  "env": {
+    "python": "3.13.16",
+    "torch": "2.11.0+cu130",
+    "transformers": "5.20.2",
+    "opacus": "1.6.0",
+    "datasets": "4.8.5",
+    "numpy": "2.1.3",
+    "sklearn": "1.6.1",
+    "device": "Tesla T4",
+    "git_commit": "04424d363444ece14350e0d1a323eb97714e5c1e"
+  },
+  "created_utc": "2026-11-25T03:26:00Z"
+}

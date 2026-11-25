@@ -1,0 +1,131 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+======================================================================
+MASTER SUBPROCESS ORCHESTRATOR: clean_all (Seed 43)
+Layers: all | DP: False | Max Steps: 1000
+======================================================================
+
+[1/3] Spawning Subprocess for Target Model M_A (train on D_A)...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+11/25/2026 03:26:23:WARNING:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+[M_A] Initializing single-model training (seed=43, run_seed=43, role=M_A, layers=all, dp=False)...
+Loading weights:   0%|          | 0/197 [00:00<?, ?it/s]Loading weights: 100%|██████████| 197/197 [00:00<00:00, 2420.95it/s]
+[transformers] [1mRobertaForSequenceClassification LOAD REPORT[0m from: roberta-base
+Key                        | Status     | 
+---------------------------+------------+-
+lm_head.dense.weight       | UNEXPECTED | 
+lm_head.layer_norm.bias    | UNEXPECTED | 
+lm_head.dense.bias         | UNEXPECTED | 
+lm_head.bias               | UNEXPECTED | 
+lm_head.layer_norm.weight  | UNEXPECTED | 
+classifier.dense.bias      | MISSING    | 
+classifier.dense.weight    | MISSING    | 
+classifier.out_proj.weight | MISSING    | 
+classifier.out_proj.bias   | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+============================================================
+Model: roberta-base | Configuration: all | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 85,646,594 (68.71%)
+============================================================
+[M_A] Optimizer: backbone_lr=3.00e-05, head_lr=9.00e-05, weight_decay=0.0
+  [M_A] Step 200/1000 | Loss: 0.0004
+  [M_A] Step 400/1000 | Loss: 0.0001
+  [M_A] Step 600/1000 | Loss: 0.0001
+  [M_A] Step 800/1000 | Loss: 0.0001
+  [M_A] Step 1000/1000 | Loss: 0.0001
+[M_A] Completed 1000 steps in 347.66s (Final Loss: 0.0001)
+
+[M_A] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_A_clean_all_seed43_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_A_clean_all_seed43_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_A_clean_all_seed43_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_A_clean_all_seed43_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_A_clean_all_seed43_validation.npy (6.9 KB)
+[M_A] Extraction Complete! Validation Accuracy: 89.91%
+  Subprocess M_A active with PID: 996
+[✓] Subprocess M_A completed in 375.05s and terminated cleanly.
+
+[2/3] Spawning Subprocess for Target Model M_B (train on D_B)...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+11/25/2026 03:32:38:WARNING:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+[M_B] Initializing single-model training (seed=43, run_seed=1043, role=M_B, layers=all, dp=False)...
+Loading weights:   0%|          | 0/197 [00:00<?, ?it/s]Loading weights: 100%|██████████| 197/197 [00:00<00:00, 2352.77it/s]
+[transformers] [1mRobertaForSequenceClassification LOAD REPORT[0m from: roberta-base
+Key                        | Status     | 
+---------------------------+------------+-
+lm_head.dense.weight       | UNEXPECTED | 
+lm_head.bias               | UNEXPECTED | 
+lm_head.dense.bias         | UNEXPECTED | 
+lm_head.layer_norm.bias    | UNEXPECTED | 
+lm_head.layer_norm.weight  | UNEXPECTED | 
+classifier.dense.weight    | MISSING    | 
+classifier.dense.bias      | MISSING    | 
+classifier.out_proj.weight | MISSING    | 
+classifier.out_proj.bias   | MISSING    | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING:	those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+============================================================
+Model: roberta-base | Configuration: all | freeze_embeddings=True (enforced)
+Total Parameters:     124,647,170
+Trainable Parameters: 85,646,594 (68.71%)
+============================================================
+[M_B] Optimizer: backbone_lr=3.00e-05, head_lr=9.00e-05, weight_decay=0.0
+  [M_B] Step 200/1000 | Loss: 0.0786
+  [M_B] Step 400/1000 | Loss: 0.0881
+  [M_B] Step 600/1000 | Loss: 0.0001
+  [M_B] Step 800/1000 | Loss: 0.0001
+  [M_B] Step 1000/1000 | Loss: 0.0001
+[M_B] Completed 1000 steps in 384.78s (Final Loss: 0.0001)
+
+[M_B] Extracting and caching logits on all 5 splits...
+  Cached D_A        logits: shape (1024, 2)  -> results/grid/logits/M_B_clean_all_seed43_D_A.npy (8.1 KB)
+  Cached D_B        logits: shape (1024, 2)  -> results/grid/logits/M_B_clean_all_seed43_D_B.npy (8.1 KB)
+  Cached D_out      logits: shape (1024, 2)  -> results/grid/logits/M_B_clean_all_seed43_D_out.npy (8.1 KB)
+  Cached D_pop      logits: shape (1024, 2)  -> results/grid/logits/M_B_clean_all_seed43_D_pop.npy (8.1 KB)
+  Cached validation logits: shape (872, 2)   -> results/grid/logits/M_B_clean_all_seed43_validation.npy (6.9 KB)
+[M_B] Extraction Complete! Validation Accuracy: 90.14%
+  Subprocess M_B active with PID: 1025
+[✓] Subprocess M_B completed in 412.37s and terminated cleanly.
+
+[3/3] CPU Post-Processing & Bidirectional Cross-Audit...
+
+======================================================================
+BIDIRECTIONAL CROSS-AUDIT METRICS: clean_all (Seed 43)
+======================================================================
+Target M_A (Trained on D_A, Shadow Reference M_B):
+  Val Accuracy:       89.91%
+  Final Train Loss:   0.0001
+  RMIA AUC (Primary): 0.6646
+  Loss AUC (Naive):   0.6571
+  RMIA Quantile AUC:  0.6647
+  RMIA TPR @ 5% FPR:  0.1113
+  RMIA TPR @ 1% FPR:  0.0508
+  Calibration Gap:    0.0075
+  Generalization Gap: 0.9996
+
+Target M_B (Trained on D_B, Shadow Reference M_A):
+  Val Accuracy:       90.14%
+  Final Train Loss:   0.0001
+  RMIA AUC (Primary): 0.6889
+  Loss AUC (Naive):   0.6768
+  RMIA Quantile AUC:  0.6889
+  RMIA TPR @ 5% FPR:  0.1143
+  RMIA TPR @ 1% FPR:  0.0527
+  Calibration Gap:    0.0121
+  Generalization Gap: 1.0070
+[✓] Appended 2 verified 22-column summary rows to results/grid/summary_rows.csv
+[✓] Record written: results/grid/records/clean_all__seed43__M_A.json (status=ok)
+[✓] Record written: results/grid/records/clean_all__seed43__M_B.json (status=ok)
+
+======================================================================
+SWAP-PAIR RUN COMPLETE in 799.90s
+Summary log: results/grid/summary_rows.csv
+======================================================================

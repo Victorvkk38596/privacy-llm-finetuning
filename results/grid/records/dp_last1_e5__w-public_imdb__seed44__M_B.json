@@ -1,0 +1,148 @@
+{
+  "schema": "grid-record-v1",
+  "status": "ok",
+  "exp_name": "dp_last1_e5__w-public_imdb",
+  "config_name": "dp_last1_e5",
+  "comparisons": [
+    "count"
+  ],
+  "seed": 44,
+  "role": "M_B",
+  "train_split": "D_B",
+  "audit": {
+    "members": "D_B",
+    "nonmembers": "D_out",
+    "population": "D_pop",
+    "reference_model": "M_A"
+  },
+  "partition_hash": "421c241904b1bee4",
+  "manifest_path": "/kaggle/working/privacy-llm-finetuning/manifests/manifest_seed44.json",
+  "train_layers_spec": "11",
+  "trainable_blocks": [
+    11
+  ],
+  "trainable_groups": {
+    "head": 592130,
+    "layer11": 7087872
+  },
+  "trainable_params": 7680002,
+  "total_params": 124647170,
+  "trainable_fraction_pct": 6.161392994321491,
+  "training": {
+    "model_name": "roberta-base",
+    "use_dp": true,
+    "freeze_embeddings": true,
+    "optimizer": "AdamW",
+    "lr_backbone": 0.001,
+    "lr_head": 0.003,
+    "weight_decay": 0.0,
+    "lr_schedule": "linear, 0.05 warmup fraction",
+    "max_steps": 300,
+    "steps_completed": 300,
+    "logical_batch_size": 64,
+    "physical_batch_size": 16,
+    "max_grad_norm": 1.0,
+    "max_length": 128,
+    "head_warmup": {
+      "source": "public_imdb",
+      "steps": 100,
+      "n_examples": 4096,
+      "fingerprint": "60e070aa42708bf5",
+      "lr": 0.001,
+      "final_loss": 0.5590814352035522,
+      "mean_loss_last10": 0.5479163289070129
+    }
+  },
+  "privacy": {
+    "target_epsilon": 5.0,
+    "target_delta": 1e-05,
+    "accounted_epsilon": 4.993386957601052,
+    "accountant": "rdp",
+    "noise_multiplier": 1.317138671875,
+    "sample_rate": 0.0625,
+    "accounting_ledger": {
+      "require_accounting": true,
+      "accounting_activated_event": 2,
+      "first_private_read_event": 3,
+      "accountant_steps_at_activation": 0,
+      "accountant_steps_at_first_private_read": 0,
+      "n_private_reads": 19548,
+      "n_private_reads_before_accounting": 0,
+      "logical_steps": 300,
+      "accountant_total_steps": 300,
+      "step_mismatches": [],
+      "public_warmup": {
+        "source": "public_imdb",
+        "n_examples": 4096,
+        "steps": 100,
+        "fingerprint": "60e070aa42708bf5"
+      },
+      "metadata_reads": {
+        "opacus_dpdataloader_shape_probe": 2
+      },
+      "metadata_window_violations": [],
+      "ordering_ok": true,
+      "steps_match_ok": true,
+      "events_head": [
+        {
+          "i": 0,
+          "kind": "public_warmup",
+          "source": "public_imdb",
+          "n_examples": 4096,
+          "steps": 100
+        },
+        {
+          "i": 1,
+          "kind": "metadata_read",
+          "reason": "opacus_dpdataloader_shape_probe",
+          "index": 0
+        },
+        {
+          "i": 2,
+          "kind": "accounting_activated",
+          "accountant_steps": 0
+        },
+        {
+          "i": 3,
+          "kind": "first_private_read",
+          "index": 5
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "val_accuracy": 68.92201834862385,
+    "val_pred_pos_rate": 0.7763761467889908,
+    "loss_auc": 0.49979305267333984,
+    "rmia_auc": 0.4919586181640625,
+    "rmia_quant_auc": 0.49196767807006836,
+    "rmia_loss_form_auc": 0.5012335777282715,
+    "rmia_tpr_at_5fpr": 0.0595703125,
+    "rmia_tpr_at_1fpr": 0.0107421875,
+    "calibration_gap": -0.007834434509277344,
+    "generalization_gap": -0.028812358653359404
+  },
+  "final_train_loss": 0.7382979989051819,
+  "clip_fraction": 0.9729895641497851,
+  "train_time_sec": 63.18516397476196,
+  "wall_time_sec": 288.1725308895111,
+  "logit_paths": {
+    "D_A": "results/grid/logits/M_B_dp_last1_e5__w-public_imdb_seed44_D_A.npy",
+    "D_B": "results/grid/logits/M_B_dp_last1_e5__w-public_imdb_seed44_D_B.npy",
+    "D_out": "results/grid/logits/M_B_dp_last1_e5__w-public_imdb_seed44_D_out.npy",
+    "D_pop": "results/grid/logits/M_B_dp_last1_e5__w-public_imdb_seed44_D_pop.npy",
+    "validation": "results/grid/logits/M_B_dp_last1_e5__w-public_imdb_seed44_validation.npy"
+  },
+  "env": {
+    "python": "3.13.16",
+    "torch": "2.11.0+cu130",
+    "transformers": "5.20.2",
+    "opacus": "1.6.0",
+    "datasets": "4.8.5",
+    "numpy": "2.1.3",
+    "sklearn": "1.6.1",
+    "device": "Tesla T4",
+    "git_commit": "04424d363444ece14350e0d1a323eb97714e5c1e"
+  },
+  "created_utc": "2026-11-25T05:51:57Z"
+}

@@ -1,0 +1,152 @@
+{
+  "schema": "grid-record-v1",
+  "status": "ok",
+  "exp_name": "dp_early3_e5__w-public_imdb",
+  "config_name": "dp_early3_e5",
+  "comparisons": [
+    "location"
+  ],
+  "seed": 42,
+  "role": "M_A",
+  "train_split": "D_A",
+  "audit": {
+    "members": "D_A",
+    "nonmembers": "D_out",
+    "population": "D_pop",
+    "reference_model": "M_B"
+  },
+  "partition_hash": "7afbcaf0706ba21a",
+  "manifest_path": "/kaggle/working/privacy-llm-finetuning/manifests/manifest_seed42.json",
+  "train_layers_spec": "0,1,2",
+  "trainable_blocks": [
+    0,
+    1,
+    2
+  ],
+  "trainable_groups": {
+    "head": 592130,
+    "layer0": 7087872,
+    "layer1": 7087872,
+    "layer2": 7087872
+  },
+  "trainable_params": 21855746,
+  "total_params": 124647170,
+  "trainable_fraction_pct": 17.534089221600457,
+  "training": {
+    "model_name": "roberta-base",
+    "use_dp": true,
+    "freeze_embeddings": true,
+    "optimizer": "AdamW",
+    "lr_backbone": 0.001,
+    "lr_head": 0.003,
+    "weight_decay": 0.0,
+    "lr_schedule": "linear, 0.05 warmup fraction",
+    "max_steps": 300,
+    "steps_completed": 300,
+    "logical_batch_size": 64,
+    "physical_batch_size": 16,
+    "max_grad_norm": 1.0,
+    "max_length": 128,
+    "head_warmup": {
+      "source": "public_imdb",
+      "steps": 100,
+      "n_examples": 4096,
+      "fingerprint": "555235c9b0fe34e7",
+      "lr": 0.001,
+      "final_loss": 0.4932834208011627,
+      "mean_loss_last10": 0.5143799722194672
+    }
+  },
+  "privacy": {
+    "target_epsilon": 5.0,
+    "target_delta": 1e-05,
+    "accounted_epsilon": 4.993386957601052,
+    "accountant": "rdp",
+    "noise_multiplier": 1.317138671875,
+    "sample_rate": 0.0625,
+    "accounting_ledger": {
+      "require_accounting": true,
+      "accounting_activated_event": 2,
+      "first_private_read_event": 3,
+      "accountant_steps_at_activation": 0,
+      "accountant_steps_at_first_private_read": 0,
+      "n_private_reads": 18944,
+      "n_private_reads_before_accounting": 0,
+      "logical_steps": 300,
+      "accountant_total_steps": 300,
+      "step_mismatches": [],
+      "public_warmup": {
+        "source": "public_imdb",
+        "n_examples": 4096,
+        "steps": 100,
+        "fingerprint": "555235c9b0fe34e7"
+      },
+      "metadata_reads": {
+        "opacus_dpdataloader_shape_probe": 2
+      },
+      "metadata_window_violations": [],
+      "ordering_ok": true,
+      "steps_match_ok": true,
+      "events_head": [
+        {
+          "i": 0,
+          "kind": "public_warmup",
+          "source": "public_imdb",
+          "n_examples": 4096,
+          "steps": 100
+        },
+        {
+          "i": 1,
+          "kind": "metadata_read",
+          "reason": "opacus_dpdataloader_shape_probe",
+          "index": 0
+        },
+        {
+          "i": 2,
+          "kind": "accounting_activated",
+          "accountant_steps": 0
+        },
+        {
+          "i": 3,
+          "kind": "first_private_read",
+          "index": 27
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "val_accuracy": 76.37614678899082,
+    "val_pred_pos_rate": 0.4197247706422018,
+    "loss_auc": 0.5248336791992188,
+    "rmia_auc": 0.5152759552001953,
+    "rmia_quant_auc": 0.5152578353881836,
+    "rmia_loss_form_auc": 0.5242061614990234,
+    "rmia_tpr_at_5fpr": 0.0498046875,
+    "rmia_tpr_at_1fpr": 0.0107421875,
+    "calibration_gap": -0.009557723999023438,
+    "generalization_gap": 0.0606658326600078
+  },
+  "final_train_loss": 0.7762898802757263,
+  "clip_fraction": 0.9389780405405406,
+  "train_time_sec": 134.69251942634583,
+  "wall_time_sec": 437.3927309513092,
+  "logit_paths": {
+    "D_A": "results/grid/logits/M_A_dp_early3_e5__w-public_imdb_seed42_D_A.npy",
+    "D_B": "results/grid/logits/M_A_dp_early3_e5__w-public_imdb_seed42_D_B.npy",
+    "D_out": "results/grid/logits/M_A_dp_early3_e5__w-public_imdb_seed42_D_out.npy",
+    "D_pop": "results/grid/logits/M_A_dp_early3_e5__w-public_imdb_seed42_D_pop.npy",
+    "validation": "results/grid/logits/M_A_dp_early3_e5__w-public_imdb_seed42_validation.npy"
+  },
+  "env": {
+    "python": "3.13.16",
+    "torch": "2.11.0+cu130",
+    "transformers": "5.20.2",
+    "opacus": "1.6.0",
+    "datasets": "4.8.5",
+    "numpy": "2.1.3",
+    "sklearn": "1.6.1",
+    "device": "Tesla T4",
+    "git_commit": "04424d363444ece14350e0d1a323eb97714e5c1e"
+  },
+  "created_utc": "2026-11-25T02:16:49Z"
+}
