@@ -6,7 +6,7 @@ two things for every configuration: validation accuracy, and empirical membershi
 RMIA membership-inference attack, kept separate from the formal (ε, δ) guarantee.
 
 *Hardware-Aware Deep Learning (Sem VII), IIT Guwahati.*
-*Team: G Jayagiri · Vasudev Krishna · Uditya Shekhawat · Pranav Vishal Deshmukh · Arkaprava Paul · Harshit Goel*
+*Team: G Jayagiri · Vasudev Krishna · Uditya Shekhawat · Pranav Vishal Deshmukh · Arkaprava Paul · Harshit Goel · Thirunagari Chethan*
 
 > **Status (November 2026):** the corrected three-seed core grid is complete: 27 swap pairs (54 models),
 > all of which passed validation. Results are in [`results/grid/`](results/grid/) and written up in
